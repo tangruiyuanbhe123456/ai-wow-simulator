@@ -443,6 +443,125 @@ def zones(lang: str = Query("zh")):
     return {"ok": True, "zones": [{**z, "name": zone_name(z["id"], lang)} for z in ZONES]}
 
 
+# ---- 5v5 Arena (Honor-of-Kings-inspired team battle) --------------------
+
+import secrets as _secrets_mod
+from server import arena as _arena_mod
+# Per-match tick thread bookkeeping
+_arena_tick_threads: dict[str, threading.Thread] = {}
+
+
+def _arena_tick_loop(match_id: str):
+    """Background loop that advances a single arena match by 1 tick/second.
+    Stops when the match ends (winner set)."""
+    import random as _r
+    rng = _r.Random()
+    while True:
+        m = _arena_mod.get_match(match_id)
+        if m is None:
+            return
+        if m.ended:
+            return
+        _arena_mod.tick_match(m, rng)
+        time.sleep(1.0)
+
+
+@app.post("/api/v1/arena/queue")
+def arena_queue(req: Request, lang: str = Query("zh")):
+    """Player joins 5v5 queue. Auto-forms match when 10 players queued.
+
+    Auth: Bearer token (same as /action). The player must already be registered
+    via /register (their token is in the Authorization header).
+    """
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    # Look up player by token (tokens are stored in a separate `tokens` table,
+    # not as a column on `players`).
+    with _db_lock:
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        tok_row = cur.fetchone()
+        if tok_row is None:
+            raise HTTPException(401, "invalid token; register first via /api/v1/register")
+        pid = tok_row["player_id"]
+        cur.execute("SELECT id, name, cls FROM players WHERE id=?", (pid,))
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(401, "token valid but player not found")
+    pid, name, cls = row["id"], row["name"], row["cls"]
+
+    qlen = _arena_mod.enqueue(pid)
+    # If queue now has >= 10, form a match.
+    m = None
+    if qlen >= 10:
+        match_id = "mtch_" + _secrets_mod.token_hex(4)
+        # We need full agent metadata. Pull all 10 from DB.
+        with _db_lock:
+            conn = db()
+            cur = conn.cursor()
+            cur.execute("SELECT id, name, cls FROM players ORDER BY last_seen DESC LIMIT 50")
+            pool = [dict(r) for r in cur.fetchall()]
+        # try_form_match pops the first 10 from the queue itself; we just need
+        # to provide a lookup callable that maps pid → ArenaAgent metadata.
+        def lookup(pid_q, team):
+            for p in pool:
+                if p["id"] == pid_q:
+                    return _arena_mod.ArenaAgent(
+                        pid=p["id"], name=p["name"], cls=p["cls"], team=team,
+                    )
+            # Fallback if lookup fails (player in queue but missing from pool)
+            return _arena_mod.ArenaAgent(pid=pid_q, name=pid_q, cls="warrior", team=team)
+        m = _arena_mod.try_form_match(match_id, lookup)
+    if m is not None:
+        # Start background tick thread
+        t = threading.Thread(target=_arena_tick_loop, args=(m.match_id,),
+                             daemon=True, name=f"arena-{m.match_id}")
+        t.start()
+        _arena_tick_threads[m.match_id] = t
+        return {
+            "ok": True,
+            "msg": _arena_mod.arena_msg("match_started", lang).replace("{0}", m.match_id),
+            "match_id": m.match_id,
+        }
+    return {
+        "ok": True,
+        "msg": _arena_mod.arena_msg("wait", lang).replace("{0}", str(qlen)),
+        "queue_len": qlen,
+    }
+
+
+@app.get("/api/v1/arena/matches")
+def arena_matches(lang: str = Query("zh")):
+    """List all active arena matches (observer endpoint)."""
+    out = []
+    for m in _arena_mod.all_matches():
+        d = m.to_dict(lang)
+        out.append({
+            "match_id": m.match_id,
+            "tick": m.tick,
+            "ended": m.ended,
+            "winner": m.winner,
+            "blue_alive": sum(1 for a in m.blue if a.alive),
+            "red_alive": sum(1 for a in m.red if a.alive),
+            "blue_crystal_hp": m.blue_crystal.hp,
+            "red_crystal_hp": m.red_crystal.hp,
+            "blue_kills": m.team_kills["blue"],
+            "red_kills": m.team_kills["red"],
+        })
+    return {"ok": True, "matches": out, "queue_len": _arena_mod.queue_len()}
+
+
+@app.get("/api/v1/arena/match/{match_id}")
+def arena_match_state(match_id: str, lang: str = Query("zh")):
+    m = _arena_mod.get_match(match_id)
+    if m is None:
+        raise HTTPException(404, _arena_mod.arena_msg("not_found", lang))
+    return m.to_dict(lang)
+
+
 # ---- Tick loop thread ------------------------------------------------------
 
 def _tick_loop():

@@ -1,0 +1,31 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Local data (kept in /data inside container; never bundle a host DB)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Build artefacts
+build/
+dist/
+*.egg-info/
