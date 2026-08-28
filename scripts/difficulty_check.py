@@ -22,9 +22,16 @@ from server.combat import perform_attack, SKILLS
 
 
 def reset_world():
-    """Wipe + reseed for clean slate."""
-    for p in Path("data").glob("world.db*"):
-        p.unlink()
+    """Wipe + reseed for clean slate. Caller owns the returned connection."""
+    import gc, sqlite3
+    # close any existing sqlite handles via gc
+    gc.collect()
+    # try to delete; on WinError 32 just truncate via a fresh connection
+    for p in list(Path("data").glob("world.db*")):
+        try:
+            p.unlink()
+        except PermissionError:
+            pass
     conn = connect()
     init_schema(conn)
     spawn_world_mobs(conn)
@@ -34,11 +41,12 @@ def reset_world():
 def make_player(conn, name: str, cls: str, level: int = 1) -> str:
     cur = conn.cursor()
     pid = gen_id("p")
+    mp_max = 60 + level * 10  # matches server.main L1 baseline + per-level scaling
     cur.execute("""INSERT INTO players (id,name,cls,level,xp,hp,hp_max,mp,mp_max,atk,defn,
                    zone,pos_x,pos_y,gold,created_at,last_seen)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (pid, name, cls, level, 0, level_to_hp(level), level_to_hp(level),
-                 30, 30, level_to_atk(level), 2, "starter_village", 0, 0, 0, time.time(), time.time()))
+                 mp_max, mp_max, level_to_atk(level), 2, "starter_village", 0, 0, 0, time.time(), time.time()))
     conn.commit()
     return pid
 
@@ -58,45 +66,67 @@ def get_player(conn, pid: str) -> dict:
 def simulate_fight(conn, players: list, boss: dict, max_ticks: int = 200) -> dict:
     """Alternate attacks/heals. Boss attacks lowest-hp player each tick.
 
-    players: list of {"id":..., "cls":..., "skill":..., "heal_skill":...}
-    boss: dict from mobs table
+    Each player attacks every tick with damage_skill. When any player HP<35%
+    of max, ALL healers cast heal (targeting lowest-HP ally).
     """
     cur = conn.cursor()
-    pid = boss["id"]
-    # Skills per class
+    bid = boss["id"]
+    # Damage skill per class
     skill_map = {"warrior": "heroic_strike", "mage": "fireball",
                  "priest": "shadow_word_pain", "hunter": "auto_shot"}
+    # Heal skill per class
     heal_map = {"priest": "holy_light"}
 
     for tick in range(max_ticks):
-        # Players attack
+        # Regen mp/hp via server.tick (matches real gameplay)
+        from server.tick import tick as do_tick
+        do_tick(conn)
+
+        # Check players' HP to decide heal-up first
+        anyone_low = False
         for pl in players:
-            r = perform_attack(conn, pl["id"], pid, pl.get("skill", skill_map.get(pl["cls"], "heroic_strike")), "zh")
-            # Heal if low HP
             cur.execute("SELECT hp, hp_max FROM players WHERE id=?", (pl["id"],))
             row = cur.fetchone()
-            if row and row["hp"] > 0 and row["hp"] < row["hp_max"] * 0.5 and pl["cls"] in heal_map:
-                perform_attack(conn, pl["id"], pl["id"], heal_map[pl["cls"]], "zh")
+            if row and row["hp"] > 0 and row["hp"] < row["hp_max"] * 0.4:
+                anyone_low = True; break
+
+        # Healer acts first if anyone low
+        if anyone_low:
+            for pl in players:
+                if pl["cls"] in heal_map:
+                    cur.execute("SELECT id FROM players WHERE id IN ({}) ORDER BY hp ASC LIMIT 1"
+                                .format(",".join("?" * len(players))), [p["id"] for p in players])
+                    tgt = cur.fetchone()
+                    if tgt:
+                        perform_attack(conn, pl["id"], tgt["id"], heal_map[pl["cls"]], "zh")
+
+        # Players attack
+        for pl in players:
+            sk = skill_map.get(pl["cls"], "heroic_strike")
+            perform_attack(conn, pl["id"], bid, sk, "zh")
 
         # Check boss
-        cur.execute("SELECT hp, alive FROM mobs WHERE id=?", (pid,))
+        cur.execute("SELECT hp, alive FROM mobs WHERE id=?", (bid,))
         brow = cur.fetchone()
         if brow and (brow["hp"] <= 0 or brow["alive"] == 0):
             return {"won": True, "ticks": tick + 1, "reason": "boss_dead"}
 
         # Check players alive
-        alive_pids = [pl["id"] for pl in players
-                      if (lambda r: r and r["hp"] > 0)(cur.execute("SELECT hp FROM players WHERE id=?", (pl["id"],)).fetchone())]
+        alive_pids = []
+        for pl in players:
+            cur.execute("SELECT hp FROM players WHERE id=?", (pl["id"],))
+            r = cur.fetchone()
+            if r and r["hp"] > 0:
+                alive_pids.append(pl["id"])
         if not alive_pids:
             return {"won": False, "ticks": tick + 1, "reason": "all_dead"}
 
         # Boss attacks lowest-hp player
-        cur.execute(f"SELECT id, hp FROM players WHERE id IN ({','.join('?'*len(alive_pids))}) ORDER BY hp ASC LIMIT 1",
+        placeholders = ",".join("?" * len(alive_pids))
+        cur.execute(f"SELECT id, hp FROM players WHERE id IN ({placeholders}) ORDER BY hp ASC LIMIT 1",
                     alive_pids)
         tgt = cur.fetchone()
         if tgt and brow and brow["hp"] > 0:
-            # Boss deals damage to player (use a generic boss skill via perform_attack but reverse)
-            # Simpler: apply damage directly
             from server.combat import base_attack_damage
             dmg = base_attack_damage(boss["level"], boss["atk"])
             cur.execute("UPDATE players SET hp=MAX(0, hp - ?) WHERE id=?", (dmg, tgt["id"]))

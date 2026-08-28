@@ -38,8 +38,8 @@ def tick(conn: sqlite3.Connection) -> Dict[str, int]:
             counters["level_up"] += 1
             cur.execute("""UPDATE players SET hp=?, hp_max=?, atk=?, mp=?, mp_max=?, xp=?, level=?, last_seen=?
                            WHERE id=?""",
-                        (level * 100 + 20, level * 100 + 20, level * 12 + 2, level * 30 + 30,
-                         level * 30 + 30, xp, level, now, p["id"]))
+                        (level * 100 + 20, level * 100 + 20, level * 12 + 2, level * 10 + 60, level * 10 + 60,
+                         xp, level, now, p["id"]))
         else:
             cur.execute("UPDATE players SET hp=?, mp=?, last_seen=? WHERE id=?",
                         (new_hp, new_mp, now, p["id"]))

@@ -132,7 +132,7 @@ def register(req: RegisterReq, lang: str = Query(DEFAULT_LANG)):
         now = time.time()
         hp_max = level_to_hp(1)
         atk = level_to_atk(1)
-        mp_max = 30
+        mp_max = 60  # L1 base mp; enough for several heals in a fight
         cur.execute("""INSERT INTO players (id,name,cls,level,xp,hp,hp_max,mp,mp_max,atk,defn,
                        zone,pos_x,pos_y,gold,guild_id,party_id,pvp_flag,created_at,last_seen)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
