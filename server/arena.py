@@ -31,6 +31,26 @@ RESPAWN_TICKS = 5
 ARENA_W = 50
 ARENA_H = 50
 
+# Neutral objectives — Honor-of-Kings-style dragons.
+# Younger dragon spawns at tick 30 in the river; whoever kills it gets +15% dmg for 25 ticks.
+# Elder dragon spawns at tick 70; +25% dmg for 40 ticks. These stack.
+DRAGON_SPAWN_TICKS = {"young": 30, "elder": 70}
+DRAGON_HP = {"young": 400, "elder": 800}
+DRAGON_REWARD = {"young": {"dmg_pct": 0.15, "duration": 25},
+                 "elder": {"dmg_pct": 0.25, "duration": 40}}
+BUFF_DURATION = 25  # default fallback if a key is missing
+
+# 3-lane map (Honor-of-Kings-style). Each lane is a corridor from one team's
+# base to the other. Agents are auto-assigned to a lane based on their index
+# in the team roster (0→top, 1→mid, 2→bot, 3→top, 4→mid).
+LANES = ["top", "mid", "bot"]
+LANE_Y = {"top": 8, "mid": 25, "bot": 42}  # y coordinate of each lane corridor
+
+# Towers — 2 per team per lane (outer + inner/高地). Inner is in front of
+# crystal; outer is between bases. Push order: outer → inner → crystal.
+TOWER_HP = {"outer": 200, "inner": 400}
+TOWER_DMG_PER_TICK = 5  # when an agent is in tower's push range
+
 
 @dataclass
 class ArenaAgent:
@@ -38,6 +58,7 @@ class ArenaAgent:
     name: str         # display name
     cls: str          # class (warrior/mage/priest/hunter)
     team: str         # 'blue' or 'red'
+    lane: str = "mid"  # 'top'/'mid'/'bot' — auto-assigned at match creation
     hp: int = 100
     hp_max: int = 100
     mp: int = 60
@@ -57,6 +78,32 @@ class Crystal:
 
 
 @dataclass
+class Tower:
+    """A lane tower (outer or inner/高地)."""
+    team: str         # which team's tower (i.e. defends this team's base)
+    lane: str         # 'top' / 'mid' / 'bot'
+    kind: str         # 'outer' / 'inner'
+    hp: int = 0       # initialized in __post_init__ via TOWER_HP
+    hp_max: int = 0
+    pos: tuple = (0, 0)
+
+    def __post_init__(self):
+        self.hp_max = TOWER_HP.get(self.kind, 200)
+        if self.hp == 0:
+            self.hp = self.hp_max
+        # x = team's side (1 for blue, ARENA_W-2 for red); y = LANE_Y[lane]
+        x = 1 if self.team == "blue" else ARENA_W - 2
+        y = LANE_Y[self.lane]
+        # outer is at x=8 from blue side, x=42 from red side (mid-river)
+        if self.kind == "outer":
+            x = 14 if self.team == "blue" else ARENA_W - 15
+        # inner is closer to base (in front of crystal)
+        else:
+            x = 6 if self.team == "blue" else ARENA_W - 7
+        self.pos = (x, y)
+
+
+@dataclass
 class ArenaMatch:
     match_id: str
     blue: list = field(default_factory=list)   # list[ArenaAgent]
@@ -70,6 +117,11 @@ class ArenaMatch:
     log: list = field(default_factory=list)   # list[(t, msg_zh, msg_en)]
     team_kills: dict = field(default_factory=lambda: {"blue": 0, "red": 0})
     team_dmg_to_crystal: dict = field(default_factory=lambda: {"blue": 0, "red": 0})
+    # Neutral objectives
+    dragons: list = field(default_factory=list)   # active dragons in the arena
+    team_buffs: dict = field(default_factory=dict)  # {"blue"/"red": {"dmg_pct": 0.2, "expires_at": tick}}
+    # 3-lane towers (6 towers total: 3 lanes × 2 kinds × 2 teams)
+    towers: list = field(default_factory=list)    # list[Tower]
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def to_dict(self, lang: str = "zh") -> dict[str, Any]:
@@ -90,12 +142,23 @@ class ArenaMatch:
                     "blue": {"hp": self.blue_crystal.hp, "max": CRYSTAL_HP},
                     "red":  {"hp": self.red_crystal.hp,  "max": CRYSTAL_HP},
                 },
+                # Neutral objectives: dragons spawn at fixed ticks; whoever kills
+                # them gets a team-wide damage buff for BUFF_DURATION ticks.
+                "dragons": self.dragons,
+                "buffs": dict(self.team_buffs),  # {team: {"dmg_pct": 0.2, "expires_at": tick}}
+                # 3-lane towers (6 towers: blue outer/inner + red outer/inner × 3 lanes)
+                "towers": [
+                    {"team": t.team, "lane": t.lane, "kind": t.kind,
+                     "hp": t.hp, "hp_max": t.hp_max, "pos": list(t.pos)}
+                    for t in self.towers
+                ],
                 "log": [self._log_view(t, m_zh, m_en, lang) for (t, m_zh, m_en) in self.log[-30:]],
             }
 
     def _agent_view(self, a: ArenaAgent) -> dict:
         return {
             "pid": a.pid, "name": a.name, "cls": a.cls, "team": a.team,
+            "lane": a.lane,
             "hp": a.hp, "hp_max": a.hp_max, "mp": a.mp, "atk": a.atk,
             "pos": list(a.pos), "alive": a.alive,
             "kills": a.kills, "deaths": a.deaths,
@@ -139,11 +202,16 @@ def enqueue(pid: str) -> int:
 
 
 def try_form_match(match_id: str, lookup_agent) -> ArenaMatch | None:
-    """If queue has ≥10 pids, pop first 10 and form a 5v5 match.
+    """If queue has ≥10 pids, pop first 10 and form a 5v5 match via draft.
 
     `lookup_agent` is a callable(pid) -> ArenaAgent (caller provides
     the agent's name+class from the registered player). Returns None if
     fewer than 10 in queue.
+
+    New: instead of jumping straight into a match, this now creates a
+    ban/pick DRAFT (see arena_draft). The actual ArenaMatch is constructed
+    later via form_match_from_draft() once the draft ends. For backwards
+    compat with the 5v5_demo, callers should also support the legacy path.
     """
     with _lock:
         if len(_queue) < 10:
@@ -151,10 +219,66 @@ def try_form_match(match_id: str, lookup_agent) -> ArenaMatch | None:
         pids = _queue[:10]
         del _queue[:10]
 
+    # Lazy import to avoid circular
+    from server import arena_draft as _draft_mod
     blue_pids = pids[:5]
     red_pids = pids[5:10]
-    blue = [lookup_agent(p, "blue") for p in blue_pids]
-    red = [lookup_agent(p, "red") for p in red_pids]
+    draft = _draft_mod.create_draft(blue_pids, red_pids)
+    # Start a background tick thread for the draft
+    import threading
+    t = threading.Thread(target=_draft_tick_loop, args=(draft.draft_id,),
+                         daemon=True, name=f"draft-{draft.draft_id}")
+    t.start()
+    # Don't create the ArenaMatch yet — that happens in _draft_tick_loop after
+    # the draft ends. Return None; the API caller should poll /arena/draft/<id>
+    # for status, then /arena/match/<match_id> once the match is up.
+    return None
+
+
+def form_match_from_draft(draft_id: str, lookup_agent) -> ArenaMatch | None:
+    """Build the actual ArenaMatch once a draft has ended.
+
+    Pulls hero assignments from the draft and overrides each agent's `cls`
+    to match the picked hero's base class (warrior/mage/priest/hunter).
+    """
+    from server import arena_draft as _draft_mod
+    d = _draft_mod.get_draft(draft_id)
+    if d is None:
+        return None
+    # Auto-fill any missing picks before building
+    _draft_mod.auto_fill_remaining(d)
+    if d.picks_made < _draft_mod.PICKS_PER_TEAM * 2:
+        return None
+
+    blue_pids = d.blue_pids
+    red_pids = d.red_pids
+
+    def lookup(pid_q, team):
+        ag = lookup_agent(pid_q, team)
+        # Override cls from draft assignment if available
+        hero_id = d.assignments.get(pid_q)
+        if hero_id:
+            ag.cls = _draft_mod.HERO_TO_BASE_CLASS.get(hero_id, ag.cls)
+        return ag
+
+    blue = [lookup(p, "blue") for p in blue_pids]
+    red = [lookup(p, "red") for p in red_pids]
+
+    # Auto-assign lanes by roster index: 0→top, 1→mid, 2→bot, 3→top, 4→mid
+    for i, a in enumerate(blue):
+        a.lane = LANES[i % 3]
+    for i, a in enumerate(red):
+        a.lane = LANES[i % 3]
+
+    # Build 6 towers (3 lanes × 2 teams × 2 kinds)
+    towers = []
+    for team in ("blue", "red"):
+        for lane in LANES:
+            for kind in ("outer", "inner"):
+                towers.append(Tower(team=team, lane=lane, kind=kind))
+
+    import secrets
+    match_id = "mtch_" + secrets.token_hex(4)
     m = ArenaMatch(
         match_id=match_id,
         blue=blue,
@@ -162,19 +286,86 @@ def try_form_match(match_id: str, lookup_agent) -> ArenaMatch | None:
         blue_crystal=Crystal(team="blue"),
         red_crystal=Crystal(team="red"),
         started_at=time.time(),
+        towers=towers,
     )
-    # Place agents at their team's side
+    # Place agents at their team's side, on their lane's y
     for i, a in enumerate(blue):
-        a.pos = (5, 5 + i * 10)
+        a.pos = (5, LANE_Y[a.lane])
     for i, a in enumerate(red):
-        a.pos = (ARENA_W - 6, 5 + i * 10)
+        a.pos = (ARENA_W - 6, LANE_Y[a.lane])
     with _lock:
         _active_matches[match_id] = m
-    m.append_log(
-        f"匹配开始! 蓝队 vs 红队 (10个 AI 集结) | Match starts! Blue vs Red (10 AIs queued)",
-        f"Match starts! Blue vs Red (10 AIs queued)",
+
+    d.append_log(
+        f"⚔️ 比赛开始! 3 路推塔 (top/mid/bot) | ⚔️ Match starts! 3-lane push (top/mid/bot)",
+        f"⚔️ Match starts! 3-lane push (top/mid/bot)",
     )
     return m
+
+
+def _draft_tick_loop(draft_id: str) -> None:
+    """Background thread: ticks the draft, when ended builds the ArenaMatch."""
+    from server import arena_draft as _draft_mod
+    d = _draft_mod.get_draft(draft_id)
+    if d is None:
+        return
+    # Use a fresh lookup_agent callable — the arena_queue endpoint passes
+    # its own, but we don't have it here. Build a default from players table.
+    def lookup_agent(pid_q, team):
+        # Lazy import to avoid circular
+        from server.db import connect as _db_connect
+        c = _db_connect()
+        cur = c.cursor()
+        cur.execute("SELECT id, name, cls FROM players WHERE id=?", (pid_q,))
+        row = cur.fetchone()
+        if row is None:
+            return ArenaAgent(pid=pid_q, name=pid_q, cls="warrior", team=team)
+        return ArenaAgent(pid=row["id"], name=row["name"], cls=row["cls"], team=team)
+
+    while True:
+        d = _draft_mod.get_draft(draft_id)
+        if d is None:
+            return
+        # Auto-fill remaining picks proactively if either team is full but
+        # the other team is still missing (i.e. picks_made >= PICKS_PER_TEAM).
+        # This makes the demo fast — no need to wait for the 60-tick timeout.
+        if not d.ended:
+            _draft_mod.tick_draft(d)
+            if (not d.ended
+                and d.picks_made >= _draft_mod.PICKS_PER_TEAM):
+                # One team is full; fill the other immediately.
+                _draft_mod.auto_fill_remaining(d)
+                if d.picks_made >= _draft_mod.PICKS_PER_TEAM * 2:
+                    d.ended = True
+                    d.append_log(
+                        "⏰ 超时未选满, 服务器自动填满 | ⏰ Auto-fill complete (timeout)",
+                        "⏰ Auto-fill complete (timeout)",
+                    )
+        if d.ended:
+            # Build the match
+            m = form_match_from_draft(draft_id, lookup_agent)
+            if m is not None:
+                # Start the match tick thread
+                import threading as _thr
+                t = _thr.Thread(target=_match_tick_loop, args=(m.match_id,),
+                               daemon=True, name=f"arena-{m.match_id}")
+                t.start()
+            return
+        time.sleep(1.0)
+
+
+def _match_tick_loop(match_id: str) -> None:
+    """Background loop that advances a single arena match by 1 tick/second."""
+    import random as _r
+    rng = _r.Random()
+    while True:
+        m = get_match(match_id)
+        if m is None:
+            return
+        if m.ended:
+            return
+        tick_match(m, rng)
+        time.sleep(1.0)
 
 
 def get_match(match_id: str) -> ArenaMatch | None:
@@ -198,12 +389,13 @@ def tick_match(m: ArenaMatch, rng: random.Random | None = None) -> None:
     """Advance the match by one tick.
 
     Order per tick:
+      0. Spawn neutral dragons if it's their spawn tick.
       1. Respawn dead agents whose cooldown expired.
-      2. Each alive agent attacks nearest enemy; melee swings only (no skills
-         here — keeps MVP simple).
-      3. If killer is in range of enemy crystal (within 3 cells of enemy base
-         edge), damage crystal instead.
+      2. Each alive agent attacks nearest priority target (dragon > enemy >
+         enemy crystal). Melee swings only (no skills here — keeps MVP simple).
+      3. If killer is in range of enemy crystal, damage crystal.
       4. Death events: killer gets a kill, victim dies, respawn timer set.
+         If a dragon dies, the killer's team gets a damage buff for X ticks.
       5. Check crystal HP == 0 → match ends.
     """
     if m.ended:
@@ -213,9 +405,66 @@ def tick_match(m: ArenaMatch, rng: random.Random | None = None) -> None:
         m.tick += 1
         tick_n = m.tick
 
+    _spawn_dragons(m, tick_n)
     _respawn_step(m, tick_n)
+    _expire_buffs(m, tick_n)
     _combat_step(m, rng, tick_n)
+    _push_towers_step(m, tick_n)
     _check_crystals(m, tick_n)
+
+
+def _spawn_dragons(m: ArenaMatch, tick_n: int) -> None:
+    """Spawn a neutral dragon at its scheduled tick if not already active."""
+    for kind, spawn_tick in DRAGON_SPAWN_TICKS.items():
+        if tick_n != spawn_tick:
+            continue
+        if any(d["kind"] == kind for d in m.dragons):
+            continue  # already alive
+        m.dragons.append({
+            "kind": kind,
+            "hp": DRAGON_HP[kind],
+            "hp_max": DRAGON_HP[kind],
+            "pos": [ARENA_W // 2, ARENA_H // 2],  # river / center
+            "last_hit_team": None,
+        })
+        zh = ("小龙" if kind == "young" else "大龙")
+        en = ("Young Dragon" if kind == "young" else "Elder Dragon")
+        m.append_log(
+            f"🐉 {zh} 在河道刷新! ({DRAGON_HP[kind]} HP, 击杀全队 +{int(DRAGON_REWARD[kind]['dmg_pct']*100)}% 伤害 {DRAGON_REWARD[kind]['duration']} tick) | 🐉 {en} spawned in river! ({DRAGON_HP[kind]} HP, kill gives team +{int(DRAGON_REWARD[kind]['dmg_pct']*100)}% dmg for {DRAGON_REWARD[kind]['duration']} ticks)",
+            f"🐉 {en} spawned in river! ({DRAGON_HP[kind]} HP, kill gives team +{int(DRAGON_REWARD[kind]['dmg_pct']*100)}% dmg for {DRAGON_REWARD[kind]['duration']} ticks)"
+        )
+
+
+def _expire_buffs(m: ArenaMatch, tick_n: int) -> None:
+    """Drop buffs whose duration has expired."""
+    expired = []
+    for team, buff in list(m.team_buffs.items()):
+        if buff.get("expires_at", 0) <= tick_n:
+            expired.append(team)
+            zh = "小龙" if buff["source"] == "young" else "大龙"
+            m.append_log(
+                f"{team}队的 {zh} buff 已结束 | {team} team's {buff['source']} dragon buff expired",
+                f"{team} team's {buff['source']} dragon buff expired"
+            )
+    for team in expired:
+        m.team_buffs.pop(team, None)
+
+
+def _apply_buff(m: ArenaMatch, team: str, dragon_kind: str, tick_n: int) -> None:
+    """Record (or stack) the team buff from killing a dragon."""
+    reward = DRAGON_REWARD[dragon_kind]
+    existing = m.team_buffs.get(team)
+    if existing and existing.get("expires_at", 0) > tick_n:
+        # Refresh + stack (Honor-of-Kings: elder buff replaces young)
+        existing["dmg_pct"] = max(existing["dmg_pct"], reward["dmg_pct"])
+        existing["expires_at"] = tick_n + reward["duration"]
+        existing["source"] = dragon_kind
+    else:
+        m.team_buffs[team] = {
+            "dmg_pct": reward["dmg_pct"],
+            "expires_at": tick_n + reward["duration"],
+            "source": dragon_kind,
+        }
 
 
 def _respawn_step(m: ArenaMatch, tick_n: int) -> None:
@@ -226,41 +475,99 @@ def _respawn_step(m: ArenaMatch, tick_n: int) -> None:
                 a.alive = True
                 a.hp = a.hp_max
                 a.mp = 60
-                # respawn at home corner
+                # respawn at home on their lane's y
                 if a.team == "blue":
-                    a.pos = (5, 5 + (m.blue.index(a)) * 10)
+                    a.pos = (5, LANE_Y.get(a.lane, 25))
                 else:
-                    a.pos = (ARENA_W - 6, 5 + (m.red.index(a)) * 10)
+                    a.pos = (ARENA_W - 6, LANE_Y.get(a.lane, 25))
                 m.append_log(
-                    f"{a.name} ({a.team}) 已复活 | {a.name} respawned",
-                    f"{a.name} ({a.team}) respawned",
+                    f"{a.name} ({a.team}/{a.lane}) 已复活 | {a.name} ({a.team}/{a.lane}) respawned",
+                    f"{a.name} ({a.team}/{a.lane}) respawned",
                 )
 
 
 def _combat_step(m: ArenaMatch, rng: random.Random, tick_n: int) -> None:
-    """Each alive agent attacks nearest enemy (or enemy crystal in range)."""
+    """Each alive agent attacks nearest priority target.
+
+    Priority order: dragon (if any alive and in range) > enemy > enemy crystal.
+
+    Damage formula: base_dmg * (1 + team_buff_dmg_pct) if team has an active buff.
+    When a dragon dies, the killer's team gets a damage buff (see _apply_buff).
+    """
     all_alive = [a for a in (m.blue + m.red) if a.alive]
     for a in all_alive:
+        # 1. Find nearest alive dragon (any team can contest)
+        dragon_target = None
+        if m.dragons:
+            dragon_target = min(m.dragons,
+                                key=lambda d: abs(d["pos"][0] - a.pos[0]) + abs(d["pos"][1] - a.pos[1]))
+        # 2. Find nearest enemy
         enemies = [e for e in all_alive if e.team != a.team]
-        if not enemies:
+        enemy_target = None
+        if enemies:
+            enemy_target = min(enemies,
+                               key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
+
+        # Choose closest by Manhattan distance (dragon or enemy); melee-only.
+        candidates = []
+        if dragon_target is not None:
+            d_dist = abs(dragon_target["pos"][0] - a.pos[0]) + abs(dragon_target["pos"][1] - a.pos[1])
+            candidates.append((d_dist, "dragon", dragon_target))
+        if enemy_target is not None:
+            e_dist = abs(enemy_target.pos[0] - a.pos[0]) + abs(enemy_target.pos[1] - a.pos[1])
+            candidates.append((e_dist, "enemy", enemy_target))
+        if not candidates:
             continue
-        # Pick nearest enemy by Manhattan distance
-        target = min(enemies, key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
-        dist = abs(target.pos[0] - a.pos[0]) + abs(target.pos[1] - a.pos[1])
-        # If far, step toward enemy (1 cell/tick toward them)
+        candidates.sort(key=lambda c: c[0])
+        dist, kind, target = candidates[0]
+
+        # If far, step toward chosen target (1 cell/tick)
         if dist > 1:
-            dx = (1 if target.pos[0] > a.pos[0] else (-1 if target.pos[0] < a.pos[0] else 0))
-            dy = (1 if target.pos[1] > a.pos[1] else (-1 if target.pos[1] < a.pos[1] else 0))
+            if kind == "dragon":
+                tx, ty = target["pos"]
+            else:
+                tx, ty = target.pos
+            dx = (1 if tx > a.pos[0] else (-1 if tx < a.pos[0] else 0))
+            dy = (1 if ty > a.pos[1] else (-1 if ty < a.pos[1] else 0))
             new_pos = (a.pos[0] + dx, a.pos[1] + dy)
-            # bound to arena
             a.pos = (max(1, min(ARENA_W - 2, new_pos[0])),
                      max(1, min(ARENA_H - 2, new_pos[1])))
             continue  # movement only, no attack this tick
-        # Melee range: hit target
+
+        # Melee range: hit target with team-buff-aware damage
         dmg = max(1, a.atk + rng.randint(0, 3))
         crit = rng.random() < 0.15
         if crit:
             dmg = int(dmg * 2)
+        # Apply team buff (additive on dmg_pct)
+        team_buff = m.team_buffs.get(a.team)
+        if team_buff and team_buff.get("expires_at", 0) > tick_n:
+            dmg = int(dmg * (1 + team_buff["dmg_pct"]))
+        # Apply to target
+        if kind == "dragon":
+            target["hp"] -= dmg
+            target["last_hit_team"] = a.team
+            if target["hp"] <= 0:
+                # Dragon slain — apply buff to killer's team
+                _apply_buff(m, a.team, target["kind"], tick_n)
+                dragon_zh = ("小龙" if target["kind"] == "young" else "大龙")
+                dragon_en = ("Young Dragon" if target["kind"] == "young" else "Elder Dragon")
+                m.append_log(
+                    f"🐉 {a.name} ({a.team}) 击杀 {dragon_zh}! 团队获得 +{int(DRAGON_REWARD[target['kind']]['dmg_pct']*100)}% 伤害 buff ({DRAGON_REWARD[target['kind']]['duration']} tick) | 🐉 {a.name} ({a.team}) slayed {dragon_en}! Team gets +{int(DRAGON_REWARD[target['kind']]['dmg_pct']*100)}% dmg buff ({DRAGON_REWARD[target['kind']]['duration']} ticks)",
+                    f"🐉 {a.name} ({a.team}) slayed {dragon_en}! Team gets +{int(DRAGON_REWARD[target['kind']]['dmg_pct']*100)}% dmg buff ({DRAGON_REWARD[target['kind']]['duration']} ticks)",
+                )
+                # Remove from dragons list
+                m.dragons[:] = [d for d in m.dragons if d["kind"] != target["kind"]]
+            elif tick_n % 2 == 0:
+                dragon_zh = ("小龙" if target["kind"] == "young" else "大龙")
+                dragon_en = ("Young Dragon" if target["kind"] == "young" else "Elder Dragon")
+                m.append_log(
+                    f"⚔️ {a.name} ({a.team}) 对 {dragon_zh} 造成 {dmg} 伤害 {'暴击!' if crit else ''} | ⚔️ {a.name} hits {dragon_en} for {dmg} {'CRIT!' if crit else ''}",
+                    f"⚔️ {a.name} hits {dragon_en} for {dmg} {'CRIT!' if crit else ''}",
+                )
+            continue  # dragon combat resolved; don't fall through to enemy code
+
+        # Enemy target hit
         target.hp -= dmg
         if target.hp <= 0:
             target.alive = False
@@ -274,12 +581,57 @@ def _combat_step(m: ArenaMatch, rng: random.Random, tick_n: int) -> None:
                 f"{a.name} ({a.team}) killed {target.name} ({target.team}) crit={crit} dmg={dmg}",
             )
         else:
-            # small log for hit (every other tick to keep log readable)
             if tick_n % 2 == 0:
                 m.append_log(
                     f"{a.name} 对 {target.name} 造成 {dmg} 伤害 {'暴击!' if crit else ''} | {a.name} hits {target.name} for {dmg} {'CRIT!' if crit else ''}",
                     f"{a.name} hits {target.name} for {dmg} {'CRIT!' if crit else ''}",
                 )
+
+
+def _push_towers_step(m: ArenaMatch, tick_n: int) -> None:
+    """3-lane tower push: an alive agent standing in range of an enemy tower
+    damages that tower. Outer towers die before inner towers; when both
+    are gone the agent can push the crystal (handled in _check_crystals).
+    """
+    PUSH_RANGE = 4  # cells
+    # Only consider ENEMY towers (those defending the other base). Each tower
+    # is "owned" by its defending team, so the OPPOSITE team can attack it.
+    for t in m.towers:
+        if t.hp <= 0:
+            continue  # already destroyed
+        attacker_team = "red" if t.team == "blue" else "blue"
+        attackers = m.blue if attacker_team == "blue" else m.red
+        # Find any alive attacker in range AND on the same lane
+        in_range = [
+            a for a in attackers
+            if a.alive
+            and a.lane == t.lane
+            and abs(a.pos[0] - t.pos[0]) <= PUSH_RANGE
+            and abs(a.pos[1] - t.pos[1]) <= PUSH_RANGE
+        ]
+        if not in_range:
+            continue
+        # Multiple agents in range stack damage
+        total_dmg = TOWER_DMG_PER_TICK * len(in_range)
+        t.hp -= total_dmg
+        if t.hp <= 0:
+            t.hp = 0
+            lane_zh = {"top": "上路", "mid": "中路", "bot": "下路"}[t.lane]
+            kind_zh = "外塔" if t.kind == "outer" else "高地塔"
+            kind_en = "outer tower" if t.kind == "outer" else "inner tower"
+            lane_en = t.lane
+            m.append_log(
+                f"🏰 {attacker_team}队 推掉 {lane_zh} {kind_zh}! | 🏰 {attacker_team} team destroyed {lane_en} {kind_en}!",
+                f"🏰 {attacker_team} team destroyed {lane_en} {kind_en}!",
+            )
+        elif tick_n % 6 == 0:  # don't spam
+            lane_zh = {"top": "上路", "mid": "中路", "bot": "下路"}[t.lane]
+            kind_zh = "外塔" if t.kind == "outer" else "高地塔"
+            kind_en = ("outer tower" if t.kind == "outer" else "inner tower")
+            m.append_log(
+                f"⚔️ {attacker_team}队 攻击 {lane_zh} {kind_zh} 伤害 {total_dmg} ({t.hp}/{t.hp_max}) | ⚔️ {attacker_team} team hits {t.lane} {kind_en} for {total_dmg} ({t.hp}/{t.hp_max})",
+                f"⚔️ {attacker_team} team hits {t.lane} {kind_en} for {total_dmg} ({t.hp}/{t.hp_max})",
+            )
 
 
 def _check_crystals(m: ArenaMatch, tick_n: int) -> None:
