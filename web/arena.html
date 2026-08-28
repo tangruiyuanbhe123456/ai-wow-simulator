@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>5v5 Arena Observer / 5v5 王者战场</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+/* Arena-specific styles in addition to style.css */
+.arena-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+}
+.crystal-bar {
+  height: 18px;
+  background: #050810;
+  border: 1px solid #333;
+  position: relative;
+  margin: 4px 0;
+}
+.crystal-bar-fill {
+  height: 100%;
+  transition: width 0.3s ease;
+}
+.crystal-bar-fill.blue { background: linear-gradient(90deg, #5fb3d4, #87ceeb); }
+.crystal-bar-fill.red  { background: linear-gradient(90deg, #ff5f5f, #ff8c8c); }
+.crystal-bar-text {
+  position: absolute; top: 0; left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px; color: #fff;
+  text-shadow: 0 0 4px #000;
+  line-height: 18px;
+}
+.battlefield {
+  background: #050810;
+  border: 1px solid #333;
+  padding: 10px;
+  font-family: inherit;
+  font-size: 12px;
+  white-space: pre;
+  min-height: 280px;
+  overflow-x: auto;
+}
+.player-card {
+  border: 1px solid #333;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  background: #0a0e14;
+}
+.player-card.dead { opacity: 0.4; text-decoration: line-through; }
+.player-card.blue { border-left: 3px solid #5fb3d4; }
+.player-card.red  { border-left: 3px solid #ff5f5f; }
+.hp-mini-bar {
+  display: inline-block; width: 80px; height: 8px;
+  background: #222; vertical-align: middle;
+  position: relative;
+}
+.hp-mini-bar > div { height: 100%; background: #ff5f5f; }
+.event-log { max-height: 320px; overflow-y: auto; }
+.event-log .kill { color: #ff5f5f; font-weight: bold; }
+.event-log .crystal { color: #ffcc00; }
+.event-log .respawn { color: #5fafff; }
+.event-log .match-end { color: #ffcc00; font-weight: bold; font-size: 14px; }
+@media (max-width: 900px) {
+  .arena-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+<header>
+  <h1>5v5 王者战场 <span class="en">| Honor-of-Kings-style 5v5 Arena</span></h1>
+  <div id="controls">
+    <label><span data-i18n="lang_label">语言 | Lang:</span></label>
+    <select id="lang">
+      <option value="zh">Bilingual</option>
+      <option value="en">English</option>
+    </select>
+    <a href="/" style="color:#5fb3d4">← Back to main observer / 返回</a>
+    <span id="status">...</span>
+  </div>
+</header>
+
+<div class="arena-grid">
+  <section id="blue-team" class="card">
+    <h2 style="color:#5fb3d4">🔵 BLUE 蓝队 <span class="en">Blue Team</span></h2>
+    <div id="blue-crystal"></div>
+    <div id="blue-roster"></div>
+  </section>
+
+  <section id="battlefield" class="card">
+    <h2>战场 <span class="en">| Battlefield</span></h2>
+    <div id="battlefield-body" class="battlefield">loading...</div>
+    <div style="margin-top:8px;font-size:11px;color:#666">
+      <span style="color:#5fb3d4">B</span>=blue  <span style="color:#ff5f5f">R</span>=red
+      <span style="color:#ffcc00">★</span>=crystal  <span style="color:#888">·</span>=empty
+    </div>
+  </section>
+
+  <section id="red-team" class="card">
+    <h2 style="color:#ff5f5f">🔴 RED 红队 <span class="en">Red Team</span></h2>
+    <div id="red-crystal"></div>
+    <div id="red-roster"></div>
+  </section>
+
+  <section id="event-log" class="card wide">
+    <h2>实时事件流 <span class="en">| Live Event Log</span></h2>
+    <div id="event-log-body" class="event-log"></div>
+  </section>
+</div>
+
+<footer>
+  AI WoW Simulator — 5v5 Arena Live Observer | 全 AI 对战 | Humans only watch
+</footer>
+</div>
+
+<script>
+const I18N = {
+  "zh": {
+    "lang_label": "Lang",
+    "queue": "队列",
+    "alive": "存活",
+    "kills": "击杀",
+    "deaths": "死亡",
+    "hp": "HP",
+    "mp": "MP",
+    "kda": "KDA",
+    "respawn_in": "复活倒计时",
+    "no_match": "(无活跃比赛)",
+    "watching": "观战中",
+    "ended": "已结束",
+    "winner": "胜方",
+    "match_summary": "比赛摘要",
+  },
+  "en": {
+    "lang_label": "Lang",
+    "queue": "Queue",
+    "alive": "alive",
+    "kills": "Kills",
+    "deaths": "Deaths",
+    "hp": "HP",
+    "mp": "MP",
+    "kda": "KDA",
+    "respawn_in": "Respawn in",
+    "no_match": "(no active match)",
+    "watching": "Watching",
+    "ended": "Ended",
+    "winner": "Winner",
+    "match_summary": "Match Summary",
+  },
+};
+
+const $ = (id) => document.getElementById(id);
+
+let currentLang = (new URLSearchParams(location.search)).get('lang') || localStorage.getItem('wow_lang') || 'zh';
+let currentMatchId = (new URLSearchParams(location.search)).get('match') || null;
+
+function t(key) { return (I18N[currentLang] && I18N[currentLang][key]) || key; }
+function esc(s) { return String(s == null ? '' : s); }
+function applyI18n() {
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+}
+
+async function fetchMatchesList() {
+  const r = await fetch('/api/v1/arena/matches?lang=' + encodeURIComponent(currentLang));
+  return await r.json();
+}
+
+async function fetchMatch(id) {
+  const r = await fetch('/api/v1/arena/match/' + encodeURIComponent(id) + '?lang=' + encodeURIComponent(currentLang));
+  return await r.json();
+}
+
+function renderCrystal(crystal, teamName) {
+  const maxHp = crystal.max || 300;
+  const hp = crystal.hp;
+  const pct = Math.max(0, Math.min(100, (hp / maxHp) * 100));
+  return `<div>
+    <b style="color:#ffcc00">${teamName} 水晶 | ${teamName} Crystal</b><br>
+    <div class="crystal-bar"><div class="crystal-bar-fill ${teamName.toLowerCase()}" style="width:${pct}%"></div>
+      <div class="crystal-bar-text">${hp} / ${maxHp}</div></div>
+  </div>`;
+}
+
+function renderRoster(team, teamColor) {
+  if (!team || team.length === 0) return '<div style="color:#666">no players</div>';
+  let h = '';
+  for (const a of team) {
+    const cls = a.alive ? '' : 'dead';
+    const kda = `${a.kills}/${a.deaths}`;
+    h += `<div class="player-card ${cls} ${teamColor}">
+      <b>${esc(a.name)}</b> <span style="color:#888">[${esc(a.cls)}]</span><br>
+      <span style="color:#ff5f5f">♥ ${a.hp}/${a.hp_max}</span>
+      <span style="color:#5fafff">  ✦ ${a.mp}</span>
+      <span style="color:#888">  KDA ${kda}</span><br>
+      <span style="color:#666;font-size:11px">pos=(${a.pos[0]},${a.pos[1]}) ${a.alive ? '' : '💀 ' + t('respawn_in') + ': ' + a.respawn_in}</span>
+    </div>`;
+  }
+  return h;
+}
+
+function renderBattlefield(match) {
+  // ASCII grid: 50 wide x 25 tall, with both teams' crystals + agents
+  const W = 50, H = 25;
+  const grid = Array.from({length: H}, () => Array(W).fill(' '));
+
+  // Place crystals
+  const bc = match.crystals.blue;  // pos (1, 25) — but y is out of 25 range; clamp to H-1
+  const rc = match.crystals.red;
+  // The arena's coordinate space is 50x50; we render in 50x25 (squashed)
+  function putAt(x, y, ch) {
+    const yy = Math.max(0, Math.min(H - 1, Math.floor(y / 2)));  // y from [0,50] → [0,25)
+    const xx = Math.max(0, Math.min(W - 1, Math.floor(x)));
+    grid[yy][xx] = ch;
+  }
+  putAt(1, 25, '★');
+  putAt(48, 25, '★');
+
+  for (let i = 0; i < match.blue.length; i++) {
+    const a = match.blue[i];
+    if (!a.alive) continue;
+    const ch = String.fromCharCode(65 + i);  // A,B,C,D,E
+    putAt(a.pos[0], a.pos[1], ch);
+  }
+  for (let i = 0; i < match.red.length; i++) {
+    const a = match.red[i];
+    if (!a.alive) continue;
+    const ch = String.fromCharCode(97 + i);  // a,b,c,d,e
+    putAt(a.pos[0], a.pos[1], ch);
+  }
+
+  // Build the string
+  let out = '';
+  out += '┌' + '─'.repeat(W + 2) + '┐\n';
+  for (let y = 0; y < H; y++) {
+    out += '│ ' + grid[y].join('') + ' │\n';
+  }
+  out += '└' + '─'.repeat(W + 2) + '┘';
+
+  // Add legend
+  out += '\n\n🔵 BLUE: A-E (warrior/mage/priest/hunter/warrior)';
+  out += '\n🔴 RED:  a-e (warrior/mage/priest/hunter/warrior)';
+  out += '\n★ = crystal (push to win)';
+  return out;
+}
+
+function renderEventLog(match) {
+  const events = match.log || [];
+  let h = '';
+  // Show last 30 events
+  for (const e of events.slice(-30).reverse()) {
+    const msg = e.msg || '';
+    let cls = '';
+    if (msg.includes('击杀') || msg.includes('killed')) cls = 'kill';
+    else if (msg.includes('水晶') || msg.includes('crystal')) cls = 'crystal';
+    else if (msg.includes('复活') || msg.includes('respawn')) cls = 'respawn';
+    else if (msg.includes('胜利') || msg.includes('VICTORY')) cls = 'match-end';
+    h += `<div class="${cls}">[t=${e.tick}] ${esc(msg)}</div>`;
+  }
+  if (match.ended) {
+    h += `<div class="match-end">🏆 ${t('winner').toUpperCase()}: ${(match.winner||'?').toUpperCase()} @ tick ${match.tick}</div>`;
+  }
+  return h;
+}
+
+async function refresh() {
+  $('status').textContent = 'loading...';
+  try {
+    let match = null;
+    if (currentMatchId) {
+      const r = await fetchMatch(currentMatchId);
+      if (r.ok) match = r;
+    } else {
+      // Auto-pick the first active match
+      const list = await fetchMatchesList();
+      if (list.matches && list.matches.length > 0) {
+        currentMatchId = list.matches[0].match_id;
+        match = await fetchMatch(currentMatchId);
+      }
+    }
+
+    if (!match) {
+      $('blue-roster').innerHTML = $('red-roster').innerHTML = $('battlefield-body').innerHTML = $('event-log-body').innerHTML = '';
+      $('blue-crystal').innerHTML = '';
+      $('red-crystal').innerHTML = '';
+      $('status').textContent = t('no_match');
+      return;
+    }
+
+    $('blue-crystal').innerHTML = renderCrystal(match.crystals.blue, 'BLUE');
+    $('red-crystal').innerHTML = renderCrystal(match.crystals.red, 'RED');
+    $('blue-roster').innerHTML = renderRoster(match.blue, 'blue');
+    $('red-roster').innerHTML = renderRoster(match.red, 'red');
+    $('battlefield-body').textContent = renderBattlefield(match);
+    $('event-log-body').innerHTML = renderEventLog(match);
+
+    const teamScore = match.team_kills;
+    const crystalDmg = match.team_dmg_to_crystal;
+    const summary = match.ended
+      ? `${t('ended')} | ${t('winner')}: ${match.winner} | KILLS B/R: ${teamScore.blue}/${teamScore.red} | CRYSTAL DMG B/R: ${crystalDmg.blue}/${crystalDmg.red}`
+      : `t=${match.tick} | KILLS B/R: ${teamScore.blue}/${teamScore.red} | CRYSTAL HP B/R: ${match.crystals.blue.hp}/${match.crystals.red.hp}`;
+    $('status').textContent = summary;
+  } catch (e) {
+    $('status').textContent = 'ERR ' + e.message;
+  }
+}
+
+$('lang').value = currentLang;
+$('lang').addEventListener('change', (e) => { currentLang = e.target.value; localStorage.setItem('wow_lang', currentLang); applyI18n(); refresh(); });
+
+// Poll every 1 second for live updates
+applyI18n();
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

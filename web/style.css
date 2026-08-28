@@ -92,6 +92,31 @@ pre {
   padding: 0 4px;
   font-weight: bold;
 }
+.arena-row {
+  border: 1px solid #333;
+  padding: 8px;
+  margin-bottom: 8px;
+  background: #0a0e14;
+}
+.arena-header {
+  margin-bottom: 6px;
+  font-size: 13px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.arena-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.arena-table td {
+  padding: 6px 12px;
+  border: 1px dashed #333;
+  vertical-align: top;
+}
+.team-blue { background: rgba(95, 179, 212, 0.08); }
+.team-red { background: rgba(255, 95, 95, 0.08); }
+.vs { width: 80px; background: #1a2030; }
 footer {
   text-align: center;
   margin-top: 16px;

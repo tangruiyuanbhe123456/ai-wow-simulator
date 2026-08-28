@@ -104,6 +104,13 @@ def root():
     return FileResponse(str(WEB_DIR / "index.html"))
 
 
+@app.get("/arena")
+@app.get("/arena.html")
+def arena_page():
+    """5v5 arena detailed observer page."""
+    return FileResponse(str(WEB_DIR / "arena.html"))
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "ts": time.time(), "version": "1.0.0"}
@@ -248,6 +255,24 @@ def _world_snapshot(lang: str) -> dict:
         cur.execute("""SELECT zone, COUNT(*) AS alive_bosses FROM mobs
                        WHERE kind='boss' AND alive=1 GROUP BY zone""")
         boss_zones = {r["zone"]: r["alive_bosses"] for r in cur.fetchall()}
+
+    # Arena summary (in-memory state, no db lock needed)
+    from server import arena as _arena_obs
+    arena_summary = []
+    for m in _arena_obs.all_matches():
+        arena_summary.append({
+            "match_id": m.match_id,
+            "tick": m.tick,
+            "ended": m.ended,
+            "winner": m.winner,
+            "blue_alive": sum(1 for a in m.blue if a.alive),
+            "red_alive": sum(1 for a in m.red if a.alive),
+            "blue_crystal_hp": m.blue_crystal.hp,
+            "red_crystal_hp": m.red_crystal.hp,
+            "blue_kills": m.team_kills["blue"],
+            "red_kills": m.team_kills["red"],
+        })
+
     return {
         "ok": True, "lang": lang, "ts": time.time(),
         "players_total": pc, "players_alive": alive,
@@ -255,6 +280,8 @@ def _world_snapshot(lang: str) -> dict:
         "top_players": top, "guilds_list": guilds,
         "boss_zones": boss_zones,
         "combat_log": log_lines, "chat_log": chat,
+        "arena_queue_len": _arena_obs.queue_len(),
+        "arena_matches": arena_summary,
     }
 
 

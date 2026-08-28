@@ -30,7 +30,80 @@ def fetch(url: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
-def build_layout(state: dict, lang: str) -> Layout:
+def fetch_match(base_url: str, match_id: str, lang: str = "zh") -> dict:
+    """Fetch detailed arena match state."""
+    return fetch(f"{base_url}/api/v1/arena/match/{match_id}?lang={lang}")
+
+
+def build_arena_panel(state: dict, base_url: str, lang: str) -> Panel:
+    """Render a panel showing all active 5v5 arena matches.
+
+    If exactly one match is active, also fetch its detailed state to show
+    live battle events; otherwise just show the summary list.
+    """
+    is_en = (lang == "en")
+    matches = state.get("arena_matches", []) or []
+    ql = state.get("arena_queue_len", 0)
+
+    table = Table(expand=True, box=box.SIMPLE, show_header=True, header_style="bold cyan")
+    table.add_column("Match", width=20, style="white")
+    table.add_column("Tick", width=5, justify="right", style="cyan")
+    table.add_column("B♥", width=6, justify="right", style="cyan")
+    table.add_column("B⚔", width=7, justify="right", style="red")
+    table.add_column("R♥", width=6, justify="right", style="red")
+    table.add_column("R⚔", width=7, justify="right", style="red")
+    table.add_column("Status", width=12, style="yellow")
+
+    if not matches:
+        table.add_row(
+            ("(no active matches)" if is_en else "(无活跃比赛)"),
+            "-", "-", "-", "-", "-", f"Q:{ql}/10",
+        )
+    else:
+        for m in matches:
+            status = (f"🏆 {m['winner']}" if m["ended"] and m.get("winner")
+                      else f"t={m['tick']}")
+            table.add_row(
+                m["match_id"][:18],
+                str(m["tick"]),
+                str(m["blue_crystal_hp"]),
+                f"{m['blue_alive']}/5 ⚔{m['blue_kills']}",
+                str(m["red_crystal_hp"]),
+                f"{m['red_alive']}/5 ⚔{m['red_kills']}",
+                status,
+            )
+
+    # If exactly 1 match is active, fetch detail and show last 6 events
+    detail_text = Text()
+    if len(matches) == 1 and base_url:
+        m = matches[0]
+        detail = fetch_match(base_url, m["match_id"], lang)
+        if detail.get("ok"):
+            label = (f"[live events for {m['match_id']}]"
+                     if is_en else f"[实时事件流 - {m['match_id']}]")
+            detail_text.append("\n" + label + "\n", style="bold magenta")
+            for evt in (detail.get("log") or [])[-6:]:
+                msg = evt.get("msg", "")[:80]
+                if "击杀" in msg or "killed" in msg:
+                    style = "red"
+                elif "水晶" in msg or "crystal" in msg:
+                    style = "yellow"
+                elif "复活" in msg or "respawn" in msg:
+                    style = "cyan"
+                else:
+                    style = "white"
+                detail_text.append(f"  t={evt['tick']} {msg}\n", style=style)
+
+    combo = Table.grid(padding=(0, 1))
+    combo.add_row(table)
+    if detail_text.plain:
+        combo.add_row(detail_text)
+
+    title = "5v5 Arena / 王者战场 (Q:" + str(ql) + "/10)"
+    return Panel(combo, title=title, border_style="magenta", box=box.SIMPLE)
+
+
+def build_layout(state: dict, lang: str, base_url: str = "") -> Layout:
     """Compose a rich Layout. Bilingual labels."""
     is_en = (lang == "en")
     title = "AI WoW Observer / AI 魔兽世界观战台"
@@ -48,6 +121,7 @@ def build_layout(state: dict, lang: str) -> Layout:
     layout["left"].split(
         Layout(name="stats", size=7),
         Layout(name="players"),
+        Layout(name="arena", size=14),
     )
     layout["right"].split(
         Layout(name="guilds", size=10),
@@ -71,6 +145,7 @@ def build_layout(state: dict, lang: str) -> Layout:
         stats.add_row("Players" if is_en else "玩家", f"{state.get('players_alive',0)}/{state.get('players_total',0)}")
         stats.add_row("Mobs" if is_en else "怪物", str(state.get('mobs_alive', 0)))
         stats.add_row("Guilds" if is_en else "公会", str(state.get('guilds', 0)))
+        stats.add_row("Arena Q" if is_en else "匹配队列", str(state.get('arena_queue_len', 0)) + "/10")
         layout["stats"].update(Panel(stats, title="Stats / 世界", border_style="cyan"))
     else:
         layout["stats"].update(Panel(f"ERR: {state.get('error','?')}", title="Stats", border_style="red"))
@@ -118,9 +193,12 @@ def build_layout(state: dict, lang: str) -> Layout:
         log_text.append(detail + "\n")
     layout["combat"].update(Panel(log_text, title="Combat / 战报", border_style="green"))
 
+    # Arena 5v5 panel
+    layout["arena"].update(build_arena_panel(state, base_url, lang))
+
     # Footer
     layout["footer"].update(Panel(
-        Text("Refresh 1s | Ctrl+C to quit / Ctrl+C 退出 | URL: " + (state.get("_url", "")), style="dim"),
+        Text(f"Refresh 1s | Ctrl+C to quit / 退出 | URL: {state.get('_url','')} | Arena: /arena.html", style="dim"),
         box=box.SQUARE))
 
     return layout
@@ -134,16 +212,17 @@ def main():
     args = ap.parse_args()
 
     console = Console()
-    url = f"{args.url}/api/v1/observer/state?lang={args.lang}"
+    base_url = args.url
+    url = f"{base_url}/api/v1/observer/state?lang={args.lang}"
     console.print(f"[cyan]Connecting to {url} ...[/cyan]")
 
     try:
-        with Live(refresh_per_second=4, screen=True, console=console) as live:
+        with Live(refresh_per_second=2, screen=True, console=console) as live:
             while True:
                 s = fetch(url)
                 s["_url"] = url
                 try:
-                    live.update(build_layout(s, args.lang))
+                    live.update(build_layout(s, args.lang, base_url))
                 except Exception as ex:
                     console.print(f"[red]render error: {ex}[/red]")
                 time.sleep(args.interval)
