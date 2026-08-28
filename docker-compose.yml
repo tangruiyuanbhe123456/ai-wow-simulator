@@ -1,0 +1,23 @@
+version: "3.8"
+services:
+  ai-wow:
+    build: .
+    image: ai-wow-simulator:latest
+    container_name: ai-wow-simulator
+    restart: unless-stopped
+    ports:
+      - "8787:8787"   # FastAPI server (HTTP REST + observer web)
+    environment:
+      - WOW_HOST=0.0.0.0
+      - WOW_PORT=8787
+      - WOW_DB_PATH=/data/world.db
+    volumes:
+      - wow-data:/data            # persist SQLite across container restarts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8787/health', timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  wow-data:
