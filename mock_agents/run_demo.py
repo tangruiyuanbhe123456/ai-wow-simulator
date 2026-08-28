@@ -1,4 +1,9 @@
-"""Spawn 5 mock AI agents that auto-party and clear the dungeon."""
+"""Spawn 5 mock AI agents that auto-party and clear the dungeon.
+
+Mana-aware: each tick SmartAgent.pick_skill() returns the strongest affordable
+skill or None. If None, the agent skips attacking that tick to wait for natural
+mp regen instead of crashing with 'Not enough mana'.
+"""
 from __future__ import annotations
 import argparse
 import threading
@@ -23,14 +28,17 @@ def run_agent(idx: int, base_url: str, cls: str, results: list):
             s = a.api.state()
             mobs = [m for m in s["mobs"] if m["kind"] == "mob"]
             if mobs:
+                sk = a.pick_skill(s)
+                if sk is None:
+                    time.sleep(0.5)
+                    continue
                 r = a.api.action("attack", {"target_id": mobs[0]["id"],
-                                              "skill_id": a.damage_skill})
+                                              "skill_id": sk})
                 log.append(("ATK", r.get("msg", "?")[:80]))
                 if not r.get("ok"):
                     break
                 time.sleep(0.5)
             if not a.alive():
-                # respawn
                 try:
                     a.api.action("respawn", {})
                 except Exception:
@@ -43,7 +51,7 @@ def run_agent(idx: int, base_url: str, cls: str, results: list):
             r = a.try_create_guild(f"Guild{idx}", tag)
             log.append(("GLD", r))
 
-        # Phase 3: party-up (all 5 converge on one party led by Bot0)
+        # Phase 3: party-up
         if idx == 0:
             r = a.form_party()
             log.append(("PTY", r))
@@ -84,9 +92,13 @@ def run_agent(idx: int, base_url: str, cls: str, results: list):
                                                   "skill_id": a.heal_skill})
                         except Exception:
                             pass
+                    sk = a.pick_skill(a.api.state())
+                    if sk is None:
+                        time.sleep(0.4)
+                        continue
                     try:
                         a.api.action("attack", {"target_id": boss["id"],
-                                                 "skill_id": a.damage_skill})
+                                                 "skill_id": sk})
                     except Exception as e:
                         log.append(("ATK_ERR", str(e)[:60]))
                         break
@@ -115,16 +127,19 @@ def run_agent(idx: int, base_url: str, cls: str, results: list):
                                                   "skill_id": a.heal_skill})
                         except Exception:
                             pass
+                    sk = a.pick_skill(a.api.state())
+                    if sk is None:
+                        time.sleep(0.4)
+                        continue
                     try:
                         a.api.action("attack", {"target_id": boss["id"],
-                                                 "skill_id": a.damage_skill})
+                                                 "skill_id": sk})
                     except Exception:
                         break
                     time.sleep(0.4)
 
         # Phase 7: PvP / guild war (optional)
         time.sleep(0.3)
-        # Leader declares war on the other guild if exists
         if idx == 0:
             try:
                 r = a.api.action("guild_list", {})
@@ -156,17 +171,14 @@ def main():
         t = threading.Thread(target=run_agent, args=(i, args.url, cls, results), daemon=True)
         threads.append(t)
         t.start()
-        time.sleep(0.2)  # stagger starts so registration order is deterministic
+        time.sleep(0.2)
 
-    # Wait up to 90s for all
     deadline = time.time() + 90
     while time.time() < deadline and any(r is None for r in results):
         time.sleep(0.5)
-    # Force join
     for t in threads:
         t.join(timeout=2)
 
-    # Print summary
     print("=" * 60)
     print("MOCK AGENTS RUN COMPLETE / 5 个假 AI 跑完")
     print("=" * 60)
