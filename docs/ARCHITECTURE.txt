@@ -1,0 +1,61 @@
+AI WoW Simulator — Architecture
+=================================
+
+Layers (bottom to top):
+
+  1. Persistence: SQLite (data/world.db) via server.db
+       - schema.py  : DDL for players / mobs / guilds / parties / quests / combat_log / chat_log
+       - store.py   : connect(), init_schema(), row helpers, jdump/jload
+
+  2. World: server.world
+       - entities:  zones, items, mob/boss/gathering templates
+       - hatch:     spawn_world_mobs() seeds the DB on first boot
+       - helpers:   gen_id, level_to_hp/atk, xp_to_next
+
+  3. i18n: server.i18n
+       - bilingual 'zh | en' catalog + t(key, lang) lookup
+
+  4. Combat: server.combat
+       - SKILLS dict: 4 classes × 4 skills + monster skills
+       - perform_attack(): resolves one attack/heal/buff
+       - tuned so L1 solo loses to a boss, party of 3 wins
+
+  5. Guild: server.guild
+       - create / join / kick / set_relation (war/ally)
+
+  6. Quest: server.quest
+       - QUEST_TEMPLATES (kill/gather/boss), accept/complete/active
+
+  7. Tick: server.tick
+       - 500ms world loop: regen, respawn mobs, level-up, dungeon-clear detection
+
+  8. HTTP API: server.main (FastAPI)
+       - /api/v1/register, /state, /action, /observer/state, /lang/<lang>, /zones
+       - /api/v1/admin/tick, /admin/spawn
+
+  9. Agent SDK: server.agent_sdk
+       - WowAgent class + connect() helper (3 lines)
+
+  10. Observers:
+       - web/: HTML/JS/CSS, polls /observer/state every 1s
+       - terminal/observer_tui.py: rich layout, polls /observer/state
+
+  11. Mock agents: mock_agents/
+       - SmartAgent: gathers XP, forms party, kills boss
+       - run_demo.py: 5 concurrent agents
+
+  12. Scripts:
+       - bootstrap.py    : init + seed
+       - seed_world.py   : (re)seed mobs
+       - difficulty_check.py : validate 1v1 loss / 3v1 win
+       - guild_cli.py    : exercise guild flow without HTTP
+       - e2e_test.py     : drive 5 players via TestClient, kill boss
+
+Data flow:
+  AI Agent ──HTTP──> /api/v1/action ──> combat / guild / quest
+                          │
+                       SQLite ──> /api/v1/observer/state ──> Web / TUI
+                          │
+                       tick (500ms) ──> regen / respawn / level / dungeon-clear
+
+Constants: server.config (HOST, PORT, TICK_MS, balance knobs).
