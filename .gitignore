@@ -47,3 +47,7 @@ dist/
 .coverage
 htmlcov/
 .tox/
+
+# Build artifacts (not for source control)
+ai-wow-simulator.bundle
+ai-wow-simulator.zip
