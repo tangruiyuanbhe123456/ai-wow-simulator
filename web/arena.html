@@ -88,16 +88,26 @@
     <div id="blue-roster"></div>
   </section>
 
-  <section id="battlefield" class="card">
-    <h2>战场 <span class="en">| Battlefield</span></h2>
-    <div id="battlefield-body" class="battlefield">loading...</div>
-    <div style="margin-top:8px;font-size:11px;color:#666">
-      <span style="color:#5fb3d4">B</span>=blue  <span style="color:#ff5f5f">R</span>=red
-      <span style="color:#ffcc00">★</span>=crystal  <span style="color:#888">·</span>=empty
-    </div>
-  </section>
+  <div id="battlefield" class="card">
+      <h2>战场 <span class="en">| Battlefield</span></h2>
+      <div id="battlefield-body" class="battlefield">loading...</div>
+      <div style="margin-top:8px;font-size:11px;color:#666">
+        <span style="color:#5fb3d4">B</span>=blue  <span style="color:#ff5f5f">R</span>=red
+        <span style="color:#ffcc00">★</span>=crystal  <span style="color:#888">·</span>=empty
+        <span style="color:#aaa">T</span>=outer tower  <span style="color:#aa5">I</span>=inner tower
+        <span style="color:#ffcc00">🐉</span>=dragon
+      </div>
+    </section>
 
-  <section id="red-team" class="card">
+    <section id="objectives" class="card">
+      <h2>中立目标 <span class="en">| Objectives</span></h2>
+      <div style="font-size:12px;color:#888;margin-bottom:4px">中立龙 / Dragons</div>
+      <div id="dragons-body"></div>
+      <div style="font-size:12px;color:#888;margin:8px 0 4px">团队 buff / Team Buffs</div>
+      <div id="buffs-body"></div>
+    </section>
+
+    <section id="red-team" class="card">
     <h2 style="color:#ff5f5f">🔴 RED 红队 <span class="en">Red Team</span></h2>
     <div id="red-crystal"></div>
     <div id="red-roster"></div>
@@ -188,12 +198,60 @@ function renderRoster(team, teamColor) {
   for (const a of team) {
     const cls = a.alive ? '' : 'dead';
     const kda = `${a.kills}/${a.deaths}`;
+    const laneBadge = `<span style="color:#5fafff">[${a.lane||'mid'}]</span>`;
     h += `<div class="player-card ${cls} ${teamColor}">
-      <b>${esc(a.name)}</b> <span style="color:#888">[${esc(a.cls)}]</span><br>
+      ${laneBadge} <b>${esc(a.name)}</b> <span style="color:#888">[${esc(a.cls)}]</span><br>
       <span style="color:#ff5f5f">♥ ${a.hp}/${a.hp_max}</span>
       <span style="color:#5fafff">  ✦ ${a.mp}</span>
       <span style="color:#888">  KDA ${kda}</span><br>
-      <span style="color:#666;font-size:11px">pos=(${a.pos[0]},${a.pos[1]}) ${a.alive ? '' : '💀 ' + t('respawn_in') + ': ' + a.respawn_in}</span>
+      <span style="color:#666;font-size:11px">pos=(${a.pos[0]},${a.pos[1]}) ${a.alive ? '' : '💀 respawn in ' + a.respawn_in}</span>
+    </div>`;
+  }
+  return h;
+}
+
+function renderTowers(towers, teamColor) {
+  if (!towers || towers.length === 0) return '<div style="color:#666;font-size:11px">no towers</div>';
+  let h = '';
+  const myTowers = towers.filter(t => t.team === teamColor);
+  for (const t of myTowers) {
+    const pct = Math.max(0, Math.min(100, (t.hp / t.hp_max) * 100));
+    const destroyed = t.hp <= 0;
+    const label = (t.lane === 'top' ? '上路' : t.lane === 'mid' ? '中路' : '下路');
+    const kindLabel = t.kind === 'outer' ? '外塔' : '高地塔';
+    const color = destroyed ? '#666' : teamColor;
+    h += `<div style="margin-bottom:4px;font-size:11px;color:${color};${destroyed ? 'text-decoration:line-through;opacity:0.5' : ''}">
+      <b>${label} ${kindLabel}</b>
+      <div class="crystal-bar" style="height:8px"><div class="crystal-bar-fill ${teamColor}" style="width:${pct}%"></div>
+        <div class="crystal-bar-text" style="line-height:8px;font-size:9px">${destroyed ? '💥' : t.hp + '/' + t.hp_max}</div></div>
+    </div>`;
+  }
+  return h;
+}
+
+function renderDragons(dragons) {
+  if (!dragons || dragons.length === 0) return '<div style="color:#666;font-size:11px">(none)</div>';
+  let h = '';
+  for (const d of dragons) {
+    const pct = Math.max(0, Math.min(100, (d.hp / d.hp_max) * 100));
+    const label = d.kind === 'young' ? '🐉 小龙 Young' : '🐉 大龙 Elder';
+    h += `<div style="margin-bottom:4px;font-size:11px;color:#ffcc00">
+      <b>${label}</b>
+      <div class="crystal-bar" style="height:8px"><div class="crystal-bar-fill" style="background:#ffcc00;width:${pct}%"></div>
+        <div class="crystal-bar-text" style="line-height:8px;font-size:9px">${d.hp}/${d.hp_max}</div></div>
+    </div>`;
+  }
+  return h;
+}
+
+function renderBuffs(buffs) {
+  if (!buffs || Object.keys(buffs).length === 0) return '<div style="color:#666;font-size:11px">(none)</div>';
+  let h = '';
+  for (const [team, b] of Object.entries(buffs)) {
+    const teamColor = team === 'blue' ? '#5fb3d4' : '#ff5f5f';
+    const dragonLabel = b.source === 'young' ? '小龙' : '大龙';
+    h += `<div style="font-size:11px;color:${teamColor};margin-bottom:2px">
+      ⚡ ${team.toUpperCase()} +${Math.round(b.dmg_pct * 100)}% dmg (${dragonLabel}, expires t=${b.expires_at})
     </div>`;
   }
   return h;
@@ -291,7 +349,12 @@ async function refresh() {
     $('red-crystal').innerHTML = renderCrystal(match.crystals.red, 'RED');
     $('blue-roster').innerHTML = renderRoster(match.blue, 'blue');
     $('red-roster').innerHTML = renderRoster(match.red, 'red');
+    // Insert towers panel above each roster
+    $('blue-roster').insertAdjacentHTML('beforebegin', '<div style="font-size:12px;color:#888;margin-bottom:4px">防御塔 / Towers</div><div id="blue-towers">' + renderTowers(match.towers, 'blue') + '</div>');
+    $('red-roster').insertAdjacentHTML('beforebegin', '<div style="font-size:12px;color:#888;margin-bottom:4px">防御塔 / Towers</div><div id="red-towers">' + renderTowers(match.towers, 'red') + '</div>');
     $('battlefield-body').textContent = renderBattlefield(match);
+    $('dragons-body').innerHTML = renderDragons(match.dragons);
+    $('buffs-body').innerHTML = renderBuffs(match.buffs);
     $('event-log-body').innerHTML = renderEventLog(match);
 
     const teamScore = match.team_kills;
