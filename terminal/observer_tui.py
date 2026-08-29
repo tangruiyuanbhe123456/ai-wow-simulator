@@ -38,13 +38,14 @@ def fetch_match(base_url: str, match_id: str, lang: str = "zh") -> dict:
 def build_arena_panel(state: dict, base_url: str, lang: str) -> Panel:
     """Render a panel showing all active 5v5 arena matches.
 
-    If exactly one match is active, also fetch its detailed state to show
-    live battle events; otherwise just show the summary list.
+    Shows match summary + dragons + towers + team buffs + (if exactly 1 match)
+    live battle events.
     """
     is_en = (lang == "en")
     matches = state.get("arena_matches", []) or []
     ql = state.get("arena_queue_len", 0)
 
+    # Match summary table
     table = Table(expand=True, box=box.SIMPLE, show_header=True, header_style="bold cyan")
     table.add_column("Match", width=20, style="white")
     table.add_column("Tick", width=5, justify="right", style="cyan")
@@ -73,7 +74,7 @@ def build_arena_panel(state: dict, base_url: str, lang: str) -> Panel:
                 status,
             )
 
-    # If exactly 1 match is active, fetch detail and show last 6 events
+    # If exactly 1 match is active, fetch detail and show towers + dragons + buffs + events
     detail_text = Text()
     if len(matches) == 1 and base_url:
         m = matches[0]
@@ -82,6 +83,43 @@ def build_arena_panel(state: dict, base_url: str, lang: str) -> Panel:
             label = (f"[live events for {m['match_id']}]"
                      if is_en else f"[实时事件流 - {m['match_id']}]")
             detail_text.append("\n" + label + "\n", style="bold magenta")
+            # Towers section
+            towers = detail.get("towers") or []
+            if towers:
+                detail_text.append(
+                    ("[towers]\n" if is_en else "[防御塔]\n"), style="bold yellow")
+                for t in towers:
+                    icon = "💥" if t["hp"] <= 0 else ("🗼" if t["kind"] == "outer" else "🏯")
+                    lane_zh = {"top": "上", "mid": "中", "bot": "下"}[t["lane"]]
+                    team_label = "B" if t["team"] == "blue" else "R"
+                    line = (f"  {icon} {team_label}/{lane_zh}{t['kind'][0].upper()} "
+                            f"{t['hp']:>3}/{t['hp_max']}\n")
+                    style = ("red" if t["team"] == "blue" else "cyan")
+                    if t["hp"] <= 0:
+                        style = "dim"
+                    detail_text.append(line, style=style)
+            # Dragons + buffs
+            dragons = detail.get("dragons") or []
+            if dragons:
+                detail_text.append(
+                    ("[dragons]\n" if is_en else "[中立龙]\n"), style="bold yellow")
+                for d in dragons:
+                    detail_text.append(f"  🐉 {d['kind']}: {d['hp']}/{d['hp_max']}\n",
+                                       style="yellow")
+            buffs = detail.get("buffs") or {}
+            if buffs:
+                detail_text.append(
+                    ("[buffs]\n" if is_en else "[团队 buff]\n"), style="bold yellow")
+                for team, b in buffs.items():
+                    color = "cyan" if team == "blue" else "red"
+                    detail_text.append(
+                        f"  ⚡ {team.upper()}: +{int(b['dmg_pct']*100)}% dmg "
+                        f"({b['source']}, expires t={b['expires_at']})\n",
+                        style=color,
+                    )
+            # Last events
+            detail_text.append(
+                ("\n[events]\n" if is_en else "\n[事件]\n"), style="bold magenta")
             for evt in (detail.get("log") or [])[-6:]:
                 msg = evt.get("msg", "")[:80]
                 if "击杀" in msg or "killed" in msg:
@@ -90,6 +128,8 @@ def build_arena_panel(state: dict, base_url: str, lang: str) -> Panel:
                     style = "yellow"
                 elif "复活" in msg or "respawn" in msg:
                     style = "cyan"
+                elif "推掉" in msg or "destroyed" in msg or "🐉" in msg:
+                    style = "magenta"
                 else:
                     style = "white"
                 detail_text.append(f"  t={evt['tick']} {msg}\n", style=style)
