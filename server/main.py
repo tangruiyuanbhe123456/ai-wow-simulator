@@ -521,43 +521,91 @@ def arena_queue(req: Request, lang: str = Query("zh")):
     pid, name, cls = row["id"], row["name"], row["cls"]
 
     qlen = _arena_mod.enqueue(pid)
-    # If queue now has >= 10, form a match.
-    m = None
+    # If queue now has >= 10, enter draft phase (ban/pick) before match starts.
+    # try_form_match now starts the draft thread and returns None; the actual
+    # ArenaMatch is created in _draft_tick_loop once the draft ends.
+    draft_id = None
     if qlen >= 10:
         match_id = "mtch_" + _secrets_mod.token_hex(4)
-        # We need full agent metadata. Pull all 10 from DB.
         with _db_lock:
             conn = db()
             cur = conn.cursor()
             cur.execute("SELECT id, name, cls FROM players ORDER BY last_seen DESC LIMIT 50")
             pool = [dict(r) for r in cur.fetchall()]
-        # try_form_match pops the first 10 from the queue itself; we just need
-        # to provide a lookup callable that maps pid → ArenaAgent metadata.
         def lookup(pid_q, team):
             for p in pool:
                 if p["id"] == pid_q:
                     return _arena_mod.ArenaAgent(
                         pid=p["id"], name=p["name"], cls=p["cls"], team=team,
                     )
-            # Fallback if lookup fails (player in queue but missing from pool)
             return _arena_mod.ArenaAgent(pid=pid_q, name=pid_q, cls="warrior", team=team)
-        m = _arena_mod.try_form_match(match_id, lookup)
-    if m is not None:
-        # Start background tick thread
-        t = threading.Thread(target=_arena_tick_loop, args=(m.match_id,),
-                             daemon=True, name=f"arena-{m.match_id}")
-        t.start()
-        _arena_tick_threads[m.match_id] = t
+        _arena_mod.try_form_match(match_id, lookup)
+        # Find the newly-created draft (most recent one)
+        from server import arena_draft as _draft_mod
+        drafts = _draft_mod.all_drafts()
+        if drafts:
+            draft_id = max(drafts, key=lambda d: d.started_at).draft_id
+    if draft_id is not None:
         return {
             "ok": True,
-            "msg": _arena_mod.arena_msg("match_started", lang).replace("{0}", m.match_id),
-            "match_id": m.match_id,
+            "msg": _draft_mod.arena_msg("draft_started", lang).replace("{0}", draft_id),
+            "draft_id": draft_id,
         }
     return {
         "ok": True,
         "msg": _arena_mod.arena_msg("wait", lang).replace("{0}", str(qlen)),
         "queue_len": qlen,
     }
+
+
+@app.get("/api/v1/arena/draft/{draft_id}")
+def arena_draft_state(draft_id: str, lang: str = Query("zh")):
+    """Get current draft state (bans, picks, assignments)."""
+    from server import arena_draft as _draft_mod
+    d = _draft_mod.get_draft(draft_id)
+    if d is None:
+        raise HTTPException(404, _draft_mod.arena_msg("draft_not_found", lang))
+    return d.to_dict(lang)
+
+
+@app.get("/api/v1/arena/drafts")
+def arena_drafts_list(lang: str = Query("zh")):
+    """List all active drafts."""
+    from server import arena_draft as _draft_mod
+    out = []
+    for d in _draft_mod.all_drafts():
+        out.append({
+            "draft_id": d.draft_id,
+            "tick": d.tick,
+            "ended": d.ended,
+            "picks_made": d.picks_made,
+            "blue_pids": d.blue_pids,
+            "red_pids": d.red_pids,
+        })
+    return {"ok": True, "drafts": out, "heroes": [
+        {"id": h[0], "name_zh": h[1], "name_en": h[2]}
+        for h in _draft_mod.HERO_POOL
+    ]}
+
+
+@app.post("/api/v1/arena/draft/{draft_id}/ban")
+def arena_draft_ban(draft_id: str, lang: str = Query("zh"), team: str = Query(...), hero: str = Query(...)):
+    """Submit a ban for the team."""
+    from server import arena_draft as _draft_mod
+    r = _draft_mod.submit_ban(draft_id, team, hero, lang)
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("error", "fail"))
+    return r
+
+
+@app.post("/api/v1/arena/draft/{draft_id}/pick")
+def arena_draft_pick(draft_id: str, lang: str = Query("zh"), pid: str = Query(...), hero: str = Query(...)):
+    """Submit a hero pick for a player pid."""
+    from server import arena_draft as _draft_mod
+    r = _draft_mod.submit_pick(draft_id, pid, hero, lang)
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("error", "fail"))
+    return r
 
 
 @app.get("/api/v1/arena/matches")
