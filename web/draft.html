@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Ban/Pick 选秀 / 5v5 Arena Draft</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.draft-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.draft-side { padding: 12px; border: 1px solid #333; background: #0a0e14; }
+.draft-side.blue { border-left: 4px solid #5fb3d4; }
+.draft-side.red  { border-left: 4px solid #ff5f5f; }
+.timer-big {
+  font-size: 48px; font-weight: bold; color: #ffcc00;
+  text-align: center; padding: 16px;
+  background: #050810; border: 2px solid #333; margin-bottom: 12px;
+  font-family: 'Consolas', monospace;
+}
+.timer-big.urgent { color: #ff5f5f; animation: pulse 0.5s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+.hero-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.hero-card {
+  border: 1px solid #333; background: #050810; padding: 8px;
+  cursor: pointer; text-align: center; font-size: 12px;
+  transition: all 0.2s;
+}
+.hero-card:hover { background: #1a2030; }
+.hero-card.banned { opacity: 0.3; pointer-events: none; text-decoration: line-through; }
+.hero-card.picked-blue { border-color: #5fb3d4; background: rgba(95,179,212,0.15); pointer-events: none; }
+.hero-card.picked-red  { border-color: #ff5f5f; background: rgba(255,95,95,0.15); pointer-events: none; }
+.hero-card.action-pending { box-shadow: 0 0 8px #ffcc00; }
+.seat-list { list-style: none; padding: 0; }
+.seat-list li {
+  padding: 6px 10px; margin: 4px 0; background: #050810;
+  border: 1px solid #333; display: flex; justify-content: space-between;
+  font-size: 13px;
+}
+.seat-list li.picked { background: rgba(95,179,212,0.1); }
+.seat-list li.spell-picked { background: rgba(255,204,0,0.1); }
+.role-banner { font-size: 14px; margin-bottom: 6px; color: #5fafff; }
+.action-zone { padding: 12px; background: #1a2030; border: 1px solid #ffcc00; margin: 12px 0; }
+.action-zone h3 { color: #ffcc00; margin-bottom: 6px; }
+.spell-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 6px; }
+.spell-card {
+  border: 1px solid #333; background: #050810; padding: 4px;
+  cursor: pointer; text-align: center; font-size: 11px;
+}
+.spell-card:hover { background: #1a2030; }
+.spell-card.disabled { opacity: 0.3; pointer-events: none; }
+.spell-card.selected { background: rgba(255,204,0,0.2); border-color: #ffcc00; }
+.phase-banner { font-size: 16px; padding: 8px 12px; margin-bottom: 12px; }
+.phase-banner.ban { background: rgba(255,95,95,0.15); border-left: 4px solid #ff5f5f; }
+.phase-banner.pick { background: rgba(95,179,212,0.15); border-left: 4px solid #5fb3d4; }
+.phase-banner.spell { background: rgba(255,204,0,0.15); border-left: 4px solid #ffcc00; }
+.phase-banner.idle { background: rgba(128,128,128,0.1); }
+</style>
+</head>
+<body>
+<div id="app" style="max-width:1400px;margin:0 auto;padding:12px">
+<header>
+  <h1>Ban/Pick 选秀 <span class="en">| 5v5 Arena Draft</span></h1>
+  <div id="controls">
+    <label>draft_id:</label>
+    <input id="draft_id" type="text" placeholder="drft_xxx" style="width:200px">
+    <input id="pid" type="text" placeholder="player pid" style="width:200px">
+    <input id="token" type="text" placeholder="bearer token" style="width:300px">
+    <a href="/" style="color:#5fb3d4">← Back</a>
+    <span id="status">idle</span>
+  </div>
+</header>
+
+<div id="timer" class="timer-big">--:--</div>
+<div id="phase" class="phase-banner idle">等待 draft_id + 玩家身份 / waiting for draft_id + identity</div>
+
+<div class="draft-grid">
+  <div class="draft-side blue">
+    <div class="role-banner">🔵 BLUE 蓝队</div>
+    <div style="font-size:12px;color:#888;margin-bottom:4px">禁用英雄 / Banned</div>
+    <div id="blue-ban">-</div>
+    <div style="font-size:12px;color:#888;margin:8px 0 4px">已选英雄 / Picked</div>
+    <ol id="blue-seats" class="seat-list"></ol>
+  </div>
+  <div class="draft-side red">
+    <div class="role-banner">🔴 RED 红队</div>
+    <div style="font-size:12px;color:#888;margin-bottom:4px">禁用英雄 / Banned</div>
+    <div id="red-ban">-</div>
+    <div style="font-size:12px;color:#888;margin:8px 0 4px">已选英雄 / Picked</div>
+    <ol id="red-seats" class="seat-list"></ol>
+  </div>
+</div>
+
+<div id="action-zone" class="action-zone" style="display:none">
+  <h3 id="action-prompt">Your turn / 你的回合</h3>
+  <div id="action-content"></div>
+</div>
+
+<div style="margin-top:16px">
+  <h2>英雄池 / Hero Pool <span style="font-size:12px;color:#888">(12 英雄, 4 基础职业 × 3 variant)</span></h2>
+  <div id="hero-pool" class="hero-grid"></div>
+</div>
+
+<div style="margin-top:16px">
+  <h2>召唤师技能 / Summoner Spells</h2>
+  <div id="spell-pool" class="spell-grid"></div>
+</div>
+
+<div style="margin-top:16px">
+  <h2>事件流 / Event Log</h2>
+  <pre id="log" style="background:#050810;padding:8px;max-height:200px;overflow-y:auto"></pre>
+</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let currentDraft = null;
+let currentHeroes = [];
+let currentSpells = [];
+let myTeam = null;   // "blue" or "red"
+let myPid = null;
+let myToken = null;
+
+function setStatus(msg) { $('status').textContent = msg; }
+
+function teamForPid(d) {
+  if (d.blue_pids.includes(myPid)) return 'blue';
+  if (d.red_pids.includes(myPid)) return 'red';
+  return null;
+}
+
+function determinePhase(d) {
+  if (d.ended) return { name: 'ended', cn: '已完成 / Complete' };
+  if (d.tick > 30) return { name: 'auto_fill', cn: '超时自动填 / Auto-fill' };
+  // Phase order: 0-1: bans (blue first), 2-11: picks (alternating), 12-29: spells
+  if (d.tick <= 2) {
+    const team = d.tick === 1 ? 'blue' : 'red';
+    if (!d.bans[team]) return { name: 'ban', team, cn: 'Ban phase: ' + team.toUpperCase() + ' 选禁用' };
+  }
+  if (d.picks_made < 10) {
+    // Picks alternate: blue/red starting with blue
+    const team = d.picks_made % 2 === 0 ? 'blue' : 'red';
+    return { name: 'pick', team, cn: 'Pick phase: ' + team.toUpperCase() + ' 选英雄' };
+  }
+  if (Object.keys(d.spells || {}).length < 10) {
+    // Spells: any order; prompt next player without spell
+    const all = [...d.blue_pids, ...d.red_pids];
+    const next = all.find(p => !d.spells[p]);
+    const team = next ? teamForPid({blue_pids: d.blue_pids, red_pids: d.red_pids}) : null;
+    return { name: 'spell', team, cn: 'Spell phase: ' + (next || 'all done') };
+  }
+  return { name: 'closing', cn: 'Closing' };
+}
+
+async function fetchDraft() {
+  const id = $('draft_id').value.trim();
+  if (!id) return;
+  myPid = $('pid').value.trim();
+  myToken = $('token').value.trim();
+  try {
+    const r = await fetch('/api/v1/arena/draft/' + encodeURIComponent(id) + '?lang=en');
+    const d = await r.json();
+    if (!d.ok) { setStatus('draft not found: ' + d.detail); return; }
+    currentDraft = d;
+    myTeam = teamForPid(d);
+    renderTimer(d);
+    renderPhase(d);
+    renderBans(d);
+    renderSeats(d);
+    renderPool(d);
+    renderSpells(d);
+    renderLog(d);
+    setStatus('tick=' + d.tick + ' remaining=' + d.remaining_ticks + ' picks=' + d.picks_made + ' my_team=' + (myTeam || 'spectator'));
+  } catch (e) { setStatus('ERR ' + e.message); }
+}
+
+function renderTimer(d) {
+  const t = $('timer');
+  if (d.ended) { t.textContent = '✓'; t.className = 'timer-big'; return; }
+  const remaining = d.remaining_ticks;
+  t.textContent = remaining + 's';
+  t.className = 'timer-big' + (remaining <= 5 ? ' urgent' : '');
+}
+
+function renderPhase(d) {
+  const ph = determinePhase(d);
+  const el = $('phase');
+  el.className = 'phase-banner ' + ph.name.split('_')[0];
+  el.textContent = `[t=${d.tick}] ${ph.cn}`;
+
+  // Action zone: only show if my turn
+  const action = $('action-zone');
+  if (d.ended) { action.style.display = 'none'; return; }
+  if (myTeam && ph.team === myTeam) {
+    action.style.display = 'block';
+    if (ph.name === 'ban') {
+      $('action-prompt').textContent = 'Your turn: 选择要 BAN 的英雄 (1 次)';
+      $('action-content').innerHTML = '<div style="color:#888">在下方英雄池点击要 ban 的英雄</div>';
+    } else if (ph.name === 'pick') {
+      $('action-prompt').textContent = 'Your turn: 选择你的英雄 (1 次)';
+      $('action-content').innerHTML = '<div style="color:#888">在下方英雄池点击要 pick 的英雄</div>';
+    } else if (ph.name === 'spell') {
+      $('action-prompt').textContent = 'Your turn: 选择你的召唤师技能 (1 次)';
+      $('action-content').innerHTML = '<div style="color:#888">在下方召唤师技能池点击</div>';
+    } else {
+      action.style.display = 'none';
+    }
+  } else {
+    action.style.display = 'none';
+  }
+}
+
+function renderBans(d) {
+  $('blue-ban').innerHTML = d.bans.blue ? `<span style="color:#5fb3d4">❌ ${heroName(d.bans.blue)}</span>` : '-';
+  $('red-ban').innerHTML  = d.bans.red  ? `<span style="color:#ff5f5f">❌ ${heroName(d.bans.red)}</span>`  : '-';
+}
+
+function renderSeats(d) {
+  const blueOL = $('blue-seats'); blueOL.innerHTML = '';
+  const redOL = $('red-seats'); redOL.innerHTML = '';
+  d.blue_pids.forEach((pid, i) => {
+    const li = document.createElement('li');
+    const hero = d.assignments[pid];
+    const spell = d.spells[pid];
+    const heroTxt = hero ? heroName(hero) : '待选...';
+    const spellTxt = spell ? spellName(spell) : '技能待选';
+    const cls = (hero && spell) ? 'picked' : (hero ? 'picked' : '');
+    li.className = cls;
+    const isMe = pid === myPid;
+    li.innerHTML = `<span>${isMe ? '👑' : '👤'} ${pidShort(pid)}${isMe ? ' (你)' : ''}</span><span><b>${heroTxt}</b> · <span style="color:#ffcc00">${spellTxt}</span></span>`;
+    blueOL.appendChild(li);
+  });
+  d.red_pids.forEach((pid) => {
+    const li = document.createElement('li');
+    const hero = d.assignments[pid];
+    const spell = d.spells[pid];
+    const heroTxt = hero ? heroName(hero) : '待选...';
+    const spellTxt = spell ? spellName(spell) : '技能待选';
+    const cls = (hero && spell) ? 'picked' : (hero ? 'picked' : '');
+    li.className = cls;
+    const isMe = pid === myPid;
+    li.innerHTML = `<span>${isMe ? '👑' : '👤'} ${pidShort(pid)}${isMe ? ' (你)' : ''}</span><span><b>${heroTxt}</b> · <span style="color:#ffcc00">${spellTxt}</span></span>`;
+    redOL.appendChild(li);
+  });
+}
+
+function renderPool(d) {
+  const pool = $('hero-pool');
+  pool.innerHTML = '';
+  currentHeroes.forEach(h => {
+    const card = document.createElement('div');
+    card.className = 'hero-card';
+    card.id = 'hero-' + h.id;
+    if (d.bans.blue === h.id || d.bans.red === h.id) card.className += ' banned';
+    if (d.picks.blue.includes(h.id)) card.className += ' picked-blue';
+    if (d.picks.red.includes(h.id)) card.className += ' picked-red';
+    card.innerHTML = `<b style="color:#5fafff">${h.id}</b><br><span style="color:#888">${h.name_zh}</span><br><span style="font-size:10px">${h.name_en}</span>`;
+    if (!card.className.includes('banned') && !card.className.includes('picked')) {
+      card.onclick = () => heroClicked(h.id);
+    }
+    pool.appendChild(card);
+  });
+}
+
+function renderSpells(d) {
+  const pool = $('spell-pool');
+  pool.innerHTML = '';
+  currentSpells.forEach(s => {
+    const card = document.createElement('div');
+    card.className = 'spell-card';
+    if (d.spells[myPid] === s.id) card.className += ' selected';
+    card.id = 'spell-' + s.id;
+    card.innerHTML = `<b style="color:#ffcc00">${s.id}</b><br><span style="color:#888">${s.name_zh}</span><br><span style="font-size:9px">${s.name_en}</span>`;
+    card.onclick = () => spellClicked(s.id);
+    pool.appendChild(card);
+  });
+}
+
+function renderLog(d) {
+  const lines = (d.log || []).map(e => `[t=${e.tick}] ${e.msg}`).slice(-20);
+  $('log').textContent = lines.join('\n');
+}
+
+function heroName(id) { const h = currentHeroes.find(x => x.id === id); return h ? h.name_zh : id; }
+function spellName(id) { const s = currentSpells.find(x => x.id === id); return s ? s.name_zh : id; }
+function pidShort(pid) { return pid.slice(-6); }
+
+async function heroClicked(heroId) {
+  if (!myToken) { setStatus('需要先填 token / need token first'); return; }
+  const d = currentDraft;
+  const ph = determinePhase(d);
+  let endpoint, params;
+  if (ph.name === 'ban' && ph.team === myTeam) {
+    endpoint = `/api/v1/arena/draft/${d.draft_id}/ban?lang=en&team=${myTeam}&hero=${heroId}`;
+  } else if (ph.name === 'pick' && ph.team === myTeam) {
+    endpoint = `/api/v1/arena/draft/${d.draft_id}/pick?lang=en&pid=${myPid}&hero=${heroId}`;
+  } else {
+    setStatus('不是你的回合 / not your turn');
+    return;
+  }
+  const r = await fetch(endpoint, { method: 'POST', headers: { 'Authorization': `Bearer ${myToken}` } });
+  const data = await r.json();
+  setStatus(data.ok ? '✓ ok' : ('✗ ' + (data.detail || data.error)));
+  fetchDraft();
+}
+
+async function spellClicked(spellId) {
+  if (!myToken) { setStatus('需要先填 token / need token first'); return; }
+  const d = currentDraft;
+  const endpoint = `/api/v1/arena/draft/${d.draft_id}/spell?lang=en&pid=${myPid}&spell=${spellId}`;
+  const r = await fetch(endpoint, { method: 'POST', headers: { 'Authorization': `Bearer ${myToken}` } });
+  const data = await r.json();
+  setStatus(data.ok ? '✓ ok' : ('✗ ' + (data.detail || data.error)));
+  fetchDraft();
+}
+
+// On load, fetch hero+spell pool
+(async function init() {
+  try {
+    const r = await fetch('/api/v1/arena/drafts');
+    const d = await r.json();
+    currentHeroes = d.heroes || [];
+    currentSpells = d.spells || [];
+  } catch (e) { setStatus('init ERR ' + e.message); }
+  setInterval(fetchDraft, 1000);
+  // Parse draft_id from URL ?draft=
+  const u = new URLSearchParams(location.search);
+  if (u.get('draft')) $('draft_id').value = u.get('draft');
+  if (u.get('pid')) $('pid').value = u.get('pid');
+  if (u.get('token')) $('token').value = u.get('token');
+  fetchDraft();
+})();
+</script>
+</body>
+</html>
