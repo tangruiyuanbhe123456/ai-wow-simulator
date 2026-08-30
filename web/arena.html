@@ -199,8 +199,14 @@ function renderRoster(team, teamColor) {
     const cls = a.alive ? '' : 'dead';
     const kda = `${a.kills}/${a.deaths}`;
     const laneBadge = `<span style="color:#5fafff">[${a.lane||'mid'}]</span>`;
+    const spellBadge = a.spell ? `<span style="color:#ffcc00">📜${a.spell}</span>` : '';
+    const ultBadge = a.ultimate ? `<span style="color:#ff5fff">⚡${a.ultimate}(cd=${a.ult_cd})</span>` : '';
+    const equipCount = a.equipment ? Object.values(a.equipment).filter(v => v).length : 0;
+    const equipBadge = `<span style="color:#aaa">🛒${equipCount}/6</span>`;
+    const goldBadge = `<span style="color:#ffd700">💰${a.gold||0}</span>`;
     h += `<div class="player-card ${cls} ${teamColor}">
-      ${laneBadge} <b>${esc(a.name)}</b> <span style="color:#888">[${esc(a.cls)}]</span><br>
+      ${laneBadge} ${spellBadge} ${ultBadge} ${equipBadge} ${goldBadge}<br>
+      <b>${esc(a.name)}</b> <span style="color:#888">[${esc(a.cls)}]</span><br>
       <span style="color:#ff5f5f">♥ ${a.hp}/${a.hp_max}</span>
       <span style="color:#5fafff">  ✦ ${a.mp}</span>
       <span style="color:#888">  KDA ${kda}</span><br>
