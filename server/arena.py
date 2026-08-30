@@ -545,36 +545,9 @@ def _tick_spell_effects(m: ArenaMatch, tick_n: int) -> None:
     eligible tick.
     """
     for a in m.blue + m.red:
-        # Auto-trigger spell (if not used yet) when conditions are right
-        if not a.spell_used and a.spell and a.alive:
-            sp = a.spell
-            enemies = [e for e in (m.blue + m.red) if e.alive and e.team != a.team]
-            if sp == "heal" and a.hp / max(1, a.hp_max) < 0.40:
-                _cast_summoner_spell(a, m, tick_n)
-            elif sp == "barrier" and a.hp / max(1, a.hp_max) < 0.60:
-                _cast_summoner_spell(a, m, tick_n)
-            elif sp == "smite" and enemies:
-                for e in enemies:
-                    dist = abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1])
-                    if dist <= 6 and e.hp / max(1, e.hp_max) < 0.15:
-                        _cast_summoner_spell(a, m, tick_n)
-                        break
-            elif sp == "ignite" and enemies:
-                # Cast when an enemy is within 4 cells
-                target = min(enemies, key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
-                if abs(target.pos[0] - a.pos[0]) + abs(target.pos[1] - a.pos[1]) <= 4:
-                    _cast_summoner_spell(a, m, tick_n)
-            elif sp == "exhaust" and enemies:
-                target = min(enemies, key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
-                if abs(target.pos[0] - a.pos[0]) + abs(target.pos[1] - a.pos[1]) <= 3:
-                    _cast_summoner_spell(a, m, tick_n)
-            elif sp == "flash" and enemies:
-                # Flash away when very low HP
-                if a.hp / max(1, a.hp_max) < 0.20:
-                    _cast_summoner_spell(a, m, tick_n)
-            elif sp == "ghost" and tick_n == 5:
-                # Cast at start of match for early mobility
-                _cast_summoner_spell(a, m, tick_n)
+        # V6: strict spell timing via _should_use_spell_now
+        if _should_use_spell_now(a, m, tick_n):
+            _cast_summoner_spell(a, m, tick_n)
 
         # Tick ongoing effects
         if a.ignite_ticks > 0:
@@ -619,11 +592,12 @@ def _shield_absorb(a: ArenaAgent, incoming: int) -> int:
 
 
 def _tick_ultimates(m: ArenaMatch, tick_n: int) -> None:
-    """Decrement all ultimates' cooldowns; trigger bot use when off-CD."""
+    """V6: Decrement all ultimates' cooldowns; trigger bot use when off-CD
+    AND in a team-fight situation."""
     for a in m.blue + m.red:
         if a.ult_cd > 0:
             a.ult_cd = max(0, a.ult_cd - 1)
-        if a.ult_cd == 0 and a.alive:
+        if a.ult_cd == 0 and a.alive and _should_use_ult_now(a, m, tick_n):
             _use_ultimate(a, m, tick_n)
 
 
@@ -1032,6 +1006,137 @@ def _respawn_step(m: ArenaMatch, tick_n: int) -> None:
                 )
 
 
+
+
+def _count_nearby(a: ArenaAgent, others: list, radius: int = 5) -> int:
+    """Count how many of `others` are within `radius` cells of a (Manhattan)."""
+    return sum(1 for o in others
+               if abs(o.pos[0] - a.pos[0]) + abs(o.pos[1] - a.pos[1]) <= radius)
+
+
+def _team_fight_state(a: ArenaAgent, m: ArenaMatch) -> dict:
+    """Snapshot of the local battlefield around agent a.
+
+    Returns counts of allies/enemies within 5 cells, plus whether a dragon
+    is nearby. Used by the bot decision tree.
+    """
+    all_alive = [x for x in (m.blue + m.red) if x.alive]
+    allies = [x for x in all_alive if x.team == a.team and x.pid != a.pid]
+    enemies = [x for x in all_alive if x.team != a.team]
+    near_allies = _count_nearby(a, allies, radius=5)
+    near_enemies = _count_nearby(a, enemies, radius=5)
+    dragon_near = False
+    if m.dragons:
+        dragon_near = any(abs(d["pos"][0] - a.pos[0]) + abs(d["pos"][1] - a.pos[1]) <= 6
+                          for d in m.dragons)
+    return {
+        "near_allies": near_allies,
+        "near_enemies": near_enemies,
+        "dragon_near": dragon_near,
+        "my_hp_pct": a.hp / max(1, a.hp_max),
+        "ally_count_alive": len(allies) + 1,
+        "enemy_count_alive": len(enemies),
+    }
+
+
+def _should_use_spell_now(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> bool:
+    """Strict spell timing: only fire when conditions make it count."""
+    if a.spell_used or not a.spell or not a.alive:
+        return False
+    s = a.spell
+    state = _team_fight_state(a, m)
+    if s == "heal":
+        # Was 40% (too eager). Now 20% (only when near death).
+        return state["my_hp_pct"] < 0.20
+    if s == "barrier":
+        # Was 60%. Now 40% — only when in real danger.
+        return state["my_hp_pct"] < 0.40 and state["near_enemies"] >= 1
+    if s == "exhaust":
+        # Only on a threat target that we are actually engaging.
+        enemies = [e for e in (m.blue + m.red)
+                   if e.alive and e.team != a.team
+                   and abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]) <= 3
+                   and e.hp / max(1, e.hp_max) > 0.20]
+        return len(enemies) > 0
+    if s == "ignite":
+        # Only when an enemy is in melee range.
+        return any(abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]) <= 3
+                   for e in (m.blue + m.red) if e.alive and e.team != a.team)
+    if s == "smite":
+        # Only when an enemy is low and within execute range.
+        return any(abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]) <= 6
+                   and e.hp / max(1, e.hp_max) < 0.15
+                   for e in (m.blue + m.red) if e.alive and e.team != a.team)
+    if s == "flash":
+        # Flash away when critical HP and enemies nearby.
+        return state["my_hp_pct"] < 0.20 and state["near_enemies"] >= 1
+    if s == "ghost":
+        # Only at the start of the match (first 5 ticks).
+        return tick_n <= 5
+    if s == "cleanse":
+        return False  # no debuffs in MVP
+    return False
+
+
+def _should_use_ult_now(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> bool:
+    """Strict ult timing: only fire during team fights (≥2 ally + ≥2 enemy)."""
+    if a.ult_cd > 0 or not a.ultimate or not a.alive:
+        return False
+    state = _team_fight_state(a, m)
+    # Was: any time. Now: only team-fight moments.
+    return state["near_allies"] >= 1 and state["near_enemies"] >= 1
+
+
+def _bot_think(a: ArenaAgent, m: ArenaMatch) -> dict:
+    """The 5-rule decision tree.
+
+    Returns {"decision": str, "target": Agent|None, "reason": str}.
+    Decisions:
+      retreat  — back to friendly crystal pos
+      fight    — engage nearest enemy (current behavior)
+      teamfight— push forward when allies outnumber
+      contest  — go for nearby dragon
+      push     — push nearest enemy tower when outer is down
+      default  — approach nearest enemy (lowest priority)
+    """
+    state = _team_fight_state(a, m)
+
+    # Rule 1: RETREAT — low HP
+    if state["my_hp_pct"] < 0.30:
+        return {"decision": "retreat", "target": None,
+                "reason": f"HP {state['my_hp_pct']*100:.0f}% < 30% — retreat"}
+
+    # Rule 2: TEAMFIGHT — both teams have ≥2 within 5 cells
+    if state["near_allies"] >= 1 and state["near_enemies"] >= 1:
+        return {"decision": "teamfight", "target": None,
+                "reason": f"teamfight ({state['near_allies']}+{state['near_enemies']} within 5)"}
+
+    # Rule 3: CONTEST — dragon is near and no big enemy force
+    if state["dragon_near"] and state["near_enemies"] < 2:
+        return {"decision": "contest", "target": None,
+                "reason": f"dragon near (enemies={state['near_enemies']}, contestable)"}
+
+    # Rule 4: PUSH — outer enemy tower in my lane is destroyed, push inner
+    my_lane_towers = [t for t in m.towers
+                      if t.team != a.team and t.lane == a.lane]
+    outer_dead = all(t.hp <= 0 for t in my_lane_towers if t.kind == "outer")                  if any(t.kind == "outer" for t in my_lane_towers) else False
+    if outer_dead:
+        return {"decision": "push", "target": None,
+                "reason": f"lane {a.lane} outer dead — push inner"}
+
+    # Rule 5: FARM (default) — find nearest enemy and pressure them
+    enemies = [e for e in (m.blue + m.red) if e.alive and e.team != a.team]
+    if enemies:
+        nearest = min(enemies, key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
+        return {"decision": "farm", "target": nearest,
+                "reason": "default — nearest enemy"}
+
+    # No enemies? Push lane.
+    return {"decision": "push", "target": None, "reason": "no enemies — push lane"}
+
+
+
+
 def _combat_step(m: ArenaMatch, rng: random.Random, tick_n: int) -> None:
     """Each alive agent attacks nearest priority target.
 
@@ -1054,25 +1159,72 @@ def _combat_step(m: ArenaMatch, rng: random.Random, tick_n: int) -> None:
             enemy_target = min(enemies,
                                key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
 
-        # Choose closest by Manhattan distance (dragon or enemy); melee-only.
-        candidates = []
-        if dragon_target is not None:
-            d_dist = abs(dragon_target["pos"][0] - a.pos[0]) + abs(dragon_target["pos"][1] - a.pos[1])
-            candidates.append((d_dist, "dragon", dragon_target))
-        if enemy_target is not None:
-            e_dist = abs(enemy_target.pos[0] - a.pos[0]) + abs(enemy_target.pos[1] - a.pos[1])
-            candidates.append((e_dist, "enemy", enemy_target))
-        if not candidates:
-            continue
-        candidates.sort(key=lambda c: c[0])
-        dist, kind, target = candidates[0]
+        # === V6: bot decision tree replaces fixed "nearest" logic ===
+        decision = _bot_think(a, m)
+        # Log the decision so observers can see why the bot chose this action
+        a._last_decision = (decision["decision"], decision["reason"])
+        m.append_log(
+            f"🧠 {a.name} ({a.team}/{a.lane}) 决策 [{decision['decision']}] {decision['reason']} | "
+            f"🧠 {a.name} ({a.team}/{a.lane}) decides [{decision['decision']}] {decision['reason']}",
+            f"🧠 {a.name} ({a.team}/{a.lane}) decides [{decision['decision']}] {decision['reason']}",
+        )
+
+        # Resolve target based on decision
+        kind = None
+        target = None
+        if decision["decision"] == "retreat":
+            # Move toward our crystal (backline)
+            our_crystal = m.blue_crystal if a.team == "blue" else m.red_crystal
+            tx, ty = our_crystal.pos
+            kind = "retreat"
+        elif decision["decision"] == "teamfight":
+            # Move toward the closest enemy while staying with allies
+            enemies = [e for e in all_alive if e.team != a.team]
+            if enemies:
+                target = min(enemies,
+                             key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
+                tx, ty = target.pos
+                kind = "enemy"
+            else:
+                tx, ty = m.blue_crystal.pos if a.team == "red" else m.red_crystal.pos
+                kind = "push"
+        elif decision["decision"] == "contest" and m.dragons:
+            target = min(m.dragons,
+                         key=lambda d: abs(d["pos"][0] - a.pos[0]) + abs(d["pos"][1] - a.pos[1]))
+            tx, ty = target["pos"]
+            kind = "dragon"
+        elif decision["decision"] == "push":
+            # Move toward the inner tower in my lane; if already down, move to crystal
+            my_lane_towers = [t for t in m.towers
+                              if t.team != a.team and t.lane == a.lane]
+            target = None
+            for t in my_lane_towers:
+                if t.kind == "inner" and t.hp > 0:
+                    target = t
+                    break
+            if target is None:
+                # Inner already down → go for crystal
+                their_crystal = m.red_crystal if a.team == "blue" else m.blue_crystal
+                tx, ty = their_crystal.pos
+                kind = "crystal"
+            else:
+                tx, ty = target.pos
+                kind = "tower"
+        else:  # "farm" or any fallback
+            enemies = [e for e in all_alive if e.team != a.team]
+            if enemies:
+                target = min(enemies,
+                             key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
+                tx, ty = target.pos
+                kind = "enemy"
+            else:
+                continue  # nothing to do
+
+        # Compute Manhattan distance to chosen target
+        dist = abs(tx - a.pos[0]) + abs(ty - a.pos[1])
 
         # If far, step toward chosen target (1 cell/tick)
         if dist > 1:
-            if kind == "dragon":
-                tx, ty = target["pos"]
-            else:
-                tx, ty = target.pos
             dx = (1 if tx > a.pos[0] else (-1 if tx < a.pos[0] else 0))
             dy = (1 if ty > a.pos[1] else (-1 if ty < a.pos[1] else 0))
             new_pos = (a.pos[0] + dx, a.pos[1] + dy)
