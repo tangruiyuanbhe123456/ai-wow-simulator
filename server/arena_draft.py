@@ -56,8 +56,25 @@ HERO_TO_BASE_CLASS = {
 }
 
 DRAFT_TIMEOUT_TICKS = 60  # 1 minute at 1s tick
-PICKS_PER_TEAM = 5
 BANS_PER_TEAM = 1
+
+# Per-mode picks per team: 1v1=1, 3v3=3, 5v5=5
+PICKS_PER_TEAM_BY_MODE = {"1v1": 1, "3v3": 3, "5v5": 5}
+PICKS_PER_TEAM = 5  # default for 5v5 (backward compat)
+
+# Per-mode team size: 1v1=1, 3v3=3, 5v5=5
+TEAM_SIZE_BY_MODE = {"1v1": 1, "3v3": 3, "5v5": 5}
+TEAM_SIZE = 5
+
+def picks_for_mode(mode: str) -> int:
+    return PICKS_PER_TEAM_BY_MODE.get(mode, 5)
+
+
+def max_picks_for_team(d: Draft) -> int:
+    """Return how many heroes per team this draft requires."""
+    return PICKS_PER_TEAM_BY_MODE.get(d.mode, 5)
+def team_size_for_mode(mode: str) -> int:
+    return TEAM_SIZE_BY_MODE.get(mode, 5)
 
 # Summoner spells — Honor-of-Kings-equivalent. Each player picks 1 (chosen
 # during draft phase). Effects trigger during the match; tracked in
@@ -91,6 +108,7 @@ class Draft:
     tick: int = 0
     ended: bool = False
     picks_made: int = 0
+    mode: str = "5v5"  # '1v1' / '3v3' / '5v5'
     log: list = field(default_factory=list)  # list[(tick, msg_zh, msg_en)]
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -147,14 +165,15 @@ def all_drafts() -> list[Draft]:
         return list(_drafts.values())
 
 
-def create_draft(blue_pids: list, red_pids: list) -> Draft:
-    """Create a new draft for the given 10 players (5 blue + 5 red)."""
+def create_draft(blue_pids: list, red_pids: list, mode: str = "5v5") -> Draft:
+    """Create a new draft for the given players. Mode: 1v1/3v3/5v5."""
     draft_id = "drft_" + secrets.token_hex(4)
     d = Draft(
         draft_id=draft_id,
         blue_pids=list(blue_pids),
         red_pids=list(red_pids),
         started_at=time.time(),
+        mode=mode,
     )
     d.append_log(
         f"选秀开始! 蓝队 {len(blue_pids)} 人 vs 红队 {len(red_pids)} 人 | Draft started! Blue {len(blue_pids)} vs Red {len(red_pids)}",
@@ -251,10 +270,11 @@ def submit_pick(draft_id: str, pid: str, hero_id: str, lang: str = "zh") -> dict
         f"{pid} ({team}) 选择 {hero_zh} ({hero_id}) [{d.picks_made}/{PICKS_PER_TEAM*2}] | {pid} ({team}) picked {hero_en} ({hero_id}) [{d.picks_made}/{PICKS_PER_TEAM*2}]",
         f"{pid} ({team}) picked {hero_en} ({hero_id}) [{d.picks_made}/{PICKS_PER_TEAM*2}]",
     )
-    if d.picks_made >= PICKS_PER_TEAM * 2:
+    total_needed = PICKS_PER_TEAM_BY_MODE.get(d.mode, 5) * 2
+    if d.picks_made >= total_needed:
         d.ended = True
         d.append_log(
-            f"选秀结束! 双方已选满 {PICKS_PER_TEAM} 英雄 | Draft complete! Both teams locked in",
+            f"选秀结束! 双方已选满 {total_needed // 2} 英雄 | Draft complete! Both teams locked in",
             f"Draft complete! Both teams locked in",
         )
     return {"ok": True, "draft_id": draft_id, "pid": pid, "hero": hero_id, "picks_made": d.picks_made}
@@ -273,11 +293,12 @@ def auto_fill_remaining(d: Draft) -> None:
     rng = _r.Random()
     rng.shuffle(available)
 
+    limit = PICKS_PER_TEAM_BY_MODE.get(d.mode, 5)
     for pid in d.blue_pids + d.red_pids:
         if pid in d.assignments:
             continue
         team = "blue" if pid in d.blue_pids else "red"
-        if len(d.picks[team]) >= PICKS_PER_TEAM:
+        if len(d.picks[team]) >= limit:
             continue
         if not available:
             break
@@ -297,7 +318,7 @@ def auto_fill_remaining(d: Draft) -> None:
         if pid not in d.spells:
             d.spells[pid] = "heal"
 
-    if d.picks_made >= PICKS_PER_TEAM * 2:
+    if d.picks_made >= PICKS_PER_TEAM_BY_MODE.get(d.mode, 5) * 2:
         d.ended = True
 
 

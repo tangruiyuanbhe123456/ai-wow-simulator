@@ -132,6 +132,13 @@ def replay_page():
     return FileResponse(str(WEB_DIR / "replay.html"))
 
 
+@app.get("/lobby")
+@app.get("/lobby.html")
+def lobby_page():
+    """Match room lobby UI (v5) — create/join/list rooms."""
+    return FileResponse(str(WEB_DIR / "lobby.html"))
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "ts": time.time(), "version": "1.0.0"}
@@ -958,6 +965,224 @@ def friends_list(req: Request, lang: str = Query("en")):
 
 
 @app.post("/api/v1/friends/remove")
+
+
+
+@app.post("/api/v1/room/create")
+def room_create(req: Request,
+                 name: str = Query(...),
+                 mode: str = Query("5v5"),
+                 region: str = Query("global"),
+                 lang: str = Query("en")):
+    """Create a match room in 'lobby' status. Creator auto-joins as 'blue'."""
+    import secrets as _sec
+    from server.db import connect as _db
+    from server import arena_draft as _draft_mod
+    if mode not in ("1v1", "3v3", "5v5"):
+        raise HTTPException(400, "mode must be 1v1/3v3/5v5")
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        creator = row["player_id"]
+        room_id = "room_" + _sec.token_hex(4)
+        cur.execute("""INSERT INTO match_rooms
+                       (id, name, mode, status, creator_pid, region, created_at)
+                       VALUES (?, ?, ?, 'lobby', ?, ?, ?)""",
+                    (room_id, name, mode, creator, region, time.time()))
+        # Creator auto-joins as blue
+        cur.execute("""INSERT OR IGNORE INTO match_room_players
+                       (room_id, pid, team, joined_at) VALUES (?, ?, 'blue', ?)""",
+                    (room_id, creator, time.time()))
+        c.commit()
+    return {"ok": True, "lang": lang, "room_id": room_id, "name": name, "mode": mode,
+            "creator_pid": creator, "status": "lobby"}
+
+
+@app.get("/api/v1/room/list")
+def room_list(lang: str = Query("en"), status: str = Query("lobby")):
+    """List rooms by status. Default: lobby (joinable)."""
+    from server.db import connect as _db
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("""SELECT r.id, r.name, r.mode, r.status, r.creator_pid,
+                              r.region, r.created_at,
+                              (SELECT COUNT(*) FROM match_room_players p
+                               WHERE p.room_id = r.id AND p.team IN ('blue','red')) AS filled,
+                              (SELECT COUNT(*) FROM match_room_players p
+                               WHERE p.room_id = r.id AND p.team = 'spectator') AS spectators
+                       FROM match_rooms r
+                       WHERE r.status = ?
+                       ORDER BY r.created_at DESC LIMIT 50""", (status,))
+        rows = cur.fetchall()
+    out = []
+    for r in rows:
+        out.append({
+            "room_id": r["id"], "name": r["name"], "mode": r["mode"],
+            "status": r["status"], "creator_pid": r["creator_pid"],
+            "region": r["region"], "created_at": r["created_at"],
+            "filled": r["filled"], "spectators": r["spectators"],
+            "team_size_needed": (1 if r["mode"] == "1v1" else (3 if r["mode"] == "3v3" else 5)),
+        })
+    return {"ok": True, "lang": lang, "rooms": out}
+
+
+@app.post("/api/v1/room/join")
+def room_join(req: Request,
+              room_id: str = Query(...),
+              team: str = Query("blue"),
+              lang: str = Query("en")):
+    """Join a room as 'blue'/'red' (player) or 'spectator'.
+
+    If the requested team is full, server auto-assigns the next available team.
+    When both teams are full, server auto-starts the draft (multi-match
+    parallelism).
+    """
+    from server.db import connect as _db
+    from server import arena as _arena_mod
+    from server import arena_draft as _draft_mod
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        pid = row["player_id"]
+        # Get room
+        cur.execute("SELECT id, mode, status FROM match_rooms WHERE id=?", (room_id,))
+        room = cur.fetchone()
+        if room is None:
+            raise HTTPException(404, "room not found")
+        if room["status"] not in ("lobby", "draft"):
+            raise HTTPException(400, f"room is {room['status']}, cannot join")
+        # Check if already in room
+        cur.execute("SELECT team FROM match_room_players WHERE room_id=? AND pid=?",
+                    (room_id, pid))
+        existing = cur.fetchone()
+        if existing:
+            team = existing["team"]
+        else:
+            team_size = (1 if room["mode"] == "1v1" else (3 if room["mode"] == "3v3" else 5))
+            # If requested team is full, auto-assign other team
+            if team in ("blue", "red"):
+                cur.execute("""SELECT COUNT(*) AS c FROM match_room_players
+                               WHERE room_id=? AND team=?""", (room_id, team))
+                cnt = cur.fetchone()["c"]
+                if cnt >= team_size:
+                    other = "red" if team == "blue" else "blue"
+                    cur.execute("""SELECT COUNT(*) AS c FROM match_room_players
+                                   WHERE room_id=? AND team=?""", (room_id, other))
+                    other_cnt = cur.fetchone()["c"]
+                    if other_cnt < team_size:
+                        team = other  # auto-assign
+                    else:
+                        team = "spectator"  # both full, spectate
+            cur.execute("""INSERT OR REPLACE INTO match_room_players
+                           (room_id, pid, team, joined_at) VALUES (?, ?, ?, ?)""",
+                        (room_id, pid, team, time.time()))
+        c.commit()
+
+        # After this join, check if both teams are full — auto-start draft
+        team_size = (1 if room["mode"] == "1v1" else (3 if room["mode"] == "3v3" else 5))
+        cur.execute("""SELECT team, GROUP_CONCAT(pid) AS pids
+                       FROM match_room_players
+                       WHERE room_id=? AND team IN ('blue','red')
+                       GROUP BY team""", (room_id,))
+        teams = {r["team"]: (r["pids"] or "").split(",") for r in cur.fetchall()}
+        blue_pids = teams.get("blue", [])
+        red_pids = teams.get("red", [])
+        auto_started = False
+        match_id_returned = None
+        if len(blue_pids) >= team_size and len(red_pids) >= team_size:
+            blue_pids = blue_pids[:team_size]
+            red_pids = red_pids[:team_size]
+            # Update room status
+            cur.execute("UPDATE match_rooms SET status='draft', started_at=? WHERE id=?",
+                        (time.time(), room_id))
+            # Create the draft
+            draft = _draft_mod.create_draft(blue_pids, red_pids, mode=room["mode"])
+            # Start draft tick thread (the existing one in arena.py)
+            import threading
+            t = threading.Thread(target=_arena_mod._draft_tick_loop,
+                                 args=(draft.draft_id,), daemon=True,
+                                 name=f"draft-{draft.draft_id}")
+            t.start()
+            # Set room's match_id to the soon-to-be match id (we'll update when match forms)
+            cur.execute("UPDATE match_rooms SET match_id=? WHERE id=?",
+                        (f"pending:{draft.draft_id}", room_id))
+            c.commit()
+            auto_started = True
+
+    return {"ok": True, "lang": lang, "room_id": room_id, "team": team,
+            "auto_started": auto_started, "filled": {"blue": len(blue_pids), "red": len(red_pids)},
+            "team_size": team_size}
+
+
+@app.get("/api/v1/room/{room_id}")
+def room_state(room_id: str, lang: str = Query("en")):
+    """Get room state + players + match_id (if draft/live)."""
+    from server.db import connect as _db
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("""SELECT id, name, mode, status, creator_pid, region,
+                              created_at, started_at, ended_at, winner, match_id
+                       FROM match_rooms WHERE id=?""", (room_id,))
+        room = cur.fetchone()
+        if room is None:
+            raise HTTPException(404, "room not found")
+        cur.execute("""SELECT pid, team, joined_at FROM match_room_players
+                       WHERE room_id=? ORDER BY team, joined_at""", (room_id,))
+        players = cur.fetchall()
+    return {
+        "ok": True, "lang": lang,
+        "room": {k: room[k] for k in room.keys()},
+        "players": [{"pid": p["pid"], "team": p["team"], "joined_at": p["joined_at"]}
+                    for p in players],
+    }
+
+
+@app.post("/api/v1/room/{room_id}/cancel")
+def room_cancel(req: Request, room_id: str, lang: str = Query("en")):
+    """Creator cancels a room."""
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        pid = row["player_id"]
+        cur.execute("SELECT creator_pid, status FROM match_rooms WHERE id=?", (room_id,))
+        room = cur.fetchone()
+        if room is None:
+            raise HTTPException(404, "room not found")
+        if room["creator_pid"] != pid:
+            raise HTTPException(403, "only creator can cancel")
+        if room["status"] in ("done", "cancelled"):
+            raise HTTPException(400, f"room already {room['status']}")
+        cur.execute("UPDATE match_rooms SET status='cancelled' WHERE id=?", (room_id,))
+        c.commit()
+    return {"ok": True, "lang": lang, "room_id": room_id, "status": "cancelled"}
+
 def friends_remove(req: Request, friend_pid: str = Query(...), lang: str = Query("en")):
     """Remove a friend (delete both rows for the pair)."""
     from server.db import connect as _db

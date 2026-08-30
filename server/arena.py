@@ -743,6 +743,7 @@ def form_match_from_draft(draft_id: str, lookup_agent) -> ArenaMatch | None:
 
     import secrets
     match_id = "mtch_" + secrets.token_hex(4)
+    from server import arena_draft as _draft_for_mode
     m = ArenaMatch(
         match_id=match_id,
         blue=blue,
@@ -752,6 +753,8 @@ def form_match_from_draft(draft_id: str, lookup_agent) -> ArenaMatch | None:
         started_at=time.time(),
         towers=towers,
     )
+    # Tag match with its mode so observers know (1v1/3v3/5v5)
+    m._mode = d.mode
     # Place agents at their team's side, on their lane's y
     for i, a in enumerate(blue):
         a.pos = (5, LANE_Y[a.lane])

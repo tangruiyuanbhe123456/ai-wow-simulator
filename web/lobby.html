@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>比赛大厅 / Match Lobby (v5)</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.lobby-grid { display: grid; grid-template-columns: 380px 1fr; gap: 16px; }
+.create-panel { padding: 12px; background: #1a2030; border: 1px solid #5fb3d4; }
+.create-panel h2 { color: #5fb3d4; margin-bottom: 12px; }
+.create-panel input, .create-panel select {
+  background: #050810; color: #ffcc00; border: 1px solid #5fb3d4;
+  padding: 6px 10px; font-family: inherit; font-size: 13px; width: 100%;
+  margin-bottom: 8px; box-sizing: border-box;
+}
+.create-panel button {
+  background: #ffcc00; color: #0a0e14; border: none; padding: 8px 16px;
+  font-weight: bold; cursor: pointer; width: 100%;
+}
+.create-panel button:hover { background: #5fb3d4; }
+.room-list-panel { padding: 12px; background: #0a0e14; }
+.room-list-panel h2 { color: #ffcc00; margin-bottom: 12px; }
+.room-card {
+  border: 1px solid #333; padding: 10px; margin-bottom: 8px;
+  background: #050810; display: grid;
+  grid-template-columns: 1fr 100px 100px 100px;
+  gap: 8px; align-items: center;
+}
+.room-card.1v1 { border-left: 4px solid #cd7f32; }
+.room-card.3v3 { border-left: 4px solid #c0c0c0; }
+.room-card.5v5 { border-left: 4px solid #ffd700; }
+.room-card.done { opacity: 0.5; }
+.room-name { color: #5fafff; font-size: 16px; font-weight: bold; }
+.room-mode { color: #ffcc00; font-size: 12px; padding: 2px 6px; background: #1a2030; border-radius: 2px; text-align: center; }
+.room-progress { color: #88ff88; font-family: monospace; }
+.room-action { text-align: right; }
+.room-action button {
+  background: #5fb3d4; color: #0a0e14; border: none; padding: 4px 8px;
+  cursor: pointer; font-size: 12px; font-weight: bold;
+}
+.room-action button.cancel { background: #ff5f5f; color: white; }
+.room-action button:hover { opacity: 0.8; }
+.filters {
+  background: #1a2030; padding: 8px; margin-bottom: 12px;
+  display: flex; gap: 8px; align-items: center;
+}
+.filters label { color: #888; font-size: 12px; }
+.filters select {
+  background: #050810; color: #ffcc00; border: 1px solid #5fb3d4;
+  padding: 4px 8px; font-family: inherit;
+}
+.empty { color: #888; padding: 20px; text-align: center; }
+.my-rooms { margin-top: 16px; padding: 12px; background: #1a2030; border: 1px solid #ffcc00; }
+.my-rooms h3 { color: #ffcc00; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<div style="max-width:1400px;margin:0 auto;padding:12px">
+<header>
+  <h1>比赛大厅 <span class="en">| Match Lobby (v5: 1v1 / 3v3 / 5v5 rooms)</span></h1>
+  <div id="controls">
+    <a href="/" style="color:#5fb3d4">← Main observer</a>
+    <a href="/leaderboard.html" style="color:#5fafff">/leaderboard</a>
+    <a href="/replay.html" style="color:#5fafff">/replay</a>
+    <a href="/draft.html" style="color:#5fafff">/draft</a>
+    <span id="status">loading...</span>
+  </div>
+</header>
+
+<div class="lobby-grid">
+  <div class="create-panel">
+    <h2>创建房间 / Create Room</h2>
+    <label>房间名 / Name</label>
+    <input id="room_name" type="text" placeholder="My arena room">
+    <label>模式 / Mode</label>
+    <select id="room_mode">
+      <option value="1v1">1v1 单挑 (Duel)</option>
+      <option value="3v3">3v3 三对三 (Skirmish)</option>
+      <option value="5v5" selected>5v5 五对五 (Standard)</option>
+    </select>
+    <label>区域 / Region</label>
+    <select id="room_region">
+      <option value="global" selected>Global 全球</option>
+      <option value="cn">CN 中国</option>
+      <option value="us">US 美国</option>
+      <option value="eu">EU 欧洲</option>
+    </select>
+    <button onclick="createRoom()">Create 创建</button>
+    <p style="font-size:11px;color:#888;margin-top:12px">
+      Tip: 创建后房间进入 lobby 状态；其他 player join 后双方满员自动开始 draft。
+    </p>
+  </div>
+
+  <div class="room-list-panel">
+    <h2>可加入的房间 / Available rooms</h2>
+    <div class="filters">
+      <label>状态 / Status:</label>
+      <select id="filter_status" onchange="fetchList()">
+        <option value="lobby" selected>Lobby (joinable)</option>
+        <option value="draft">Draft (in progress)</option>
+        <option value="live">Live (fighting)</option>
+        <option value="done">Done</option>
+        <option value="cancelled">Cancelled</option>
+      </select>
+      <label>模式 / Mode:</label>
+      <select id="filter_mode" onchange="fetchList()">
+        <option value="all" selected>All</option>
+        <option value="1v1">1v1</option>
+        <option value="3v3">3v3</option>
+        <option value="5v5">5v5</option>
+      </select>
+      <button onclick="fetchList()" style="background:#5fb3d4;color:#0a0e14;border:none;padding:4px 12px;cursor:pointer">Refresh 刷新</button>
+    </div>
+    <div id="room-list">loading...</div>
+  </div>
+</div>
+
+<div class="my-rooms">
+  <h3>我的房间 / My rooms</h3>
+  <div id="my-rooms">loading...</div>
+</div>
+
+<footer>
+  <p style="text-align:center;color:#666;font-size:11px;margin-top:24px">
+    v5: 比赛室模式 (1v1/3v3/5v5) + 多 match 并行 / match_room schema + 满员自动 draft
+  </p>
+</footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let myPid = null;
+let myToken = null;
+
+function setStatus(msg) { $('status').textContent = msg; }
+
+// Load pid+token from URL (so draft.html can link to this)
+(function init() {
+  const u = new URLSearchParams(location.search);
+  myPid = u.get('pid');
+  myToken = u.get('token');
+  if (u.get('name')) $('room_name').value = u.get('name');
+})();
+
+function modeZh(mode) { return { '1v1': '1v1 单挑', '3v3': '3v3 团战', '5v5': '5v5 战场' }[mode] || mode; }
+function modeSize(mode) { return { '1v1': 1, '3v3': 3, '5v5': 5 }[mode] || 5; }
+function esc(s) { return String(s == null ? '' : s); }
+function relTime(ts) {
+  const s = Math.floor(Date.now() / 1000 - ts);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  return Math.floor(s / 3600) + 'h ago';
+}
+
+async function call(path, method='GET', params=null) {
+  if (params) {
+    const qs = new URLSearchParams(params).toString();
+    path += (path.includes('?') ? '&' : '?') + qs;
+  }
+  const headers = { 'Content-Type': 'application/json' };
+  if (myToken) headers['Authorization'] = 'Bearer ' + myToken;
+  const opts = { method, headers };
+  const r = await fetch(path, opts);
+  return await r.json();
+}
+
+async function createRoom() {
+  const name = $('room_name').value.trim() || ('Room ' + new Date().toLocaleTimeString());
+  const mode = $('room_mode').value;
+  const region = $('room_region').value;
+  const r = await call('/api/v1/room/create', 'POST', { name, mode, region });
+  if (r.ok) {
+    setStatus('✓ room ' + r.room_id + ' created (mode=' + r.mode + ')');
+    fetchList();
+    fetchMyRooms();
+  } else {
+    setStatus('✗ ' + (r.detail || 'create failed'));
+  }
+}
+
+async function joinRoom(roomId, team) {
+  const r = await call('/api/v1/room/join', 'POST', { room_id: roomId, team });
+  if (r.ok) {
+    setStatus('✓ joined as ' + r.team + (r.auto_started ? ' — draft starting!' : ''));
+    fetchList();
+  } else {
+    setStatus('✗ ' + (r.detail || 'join failed'));
+  }
+}
+
+async function cancelRoom(roomId) {
+  if (!confirm('Cancel this room?')) return;
+  const r = await call('/api/v1/room/' + roomId + '/cancel', 'POST');
+  if (r.ok) {
+    setStatus('✓ cancelled');
+    fetchList();
+  } else {
+    setStatus('✗ ' + (r.detail || 'cancel failed'));
+  }
+}
+
+async function fetchList() {
+  try {
+    const status = $('filter_status').value;
+    const mode = $('filter_mode').value;
+    const params = { status };
+    if (mode !== 'all') params.mode = mode;
+    const r = await call('/api/v1/room/list', 'GET', params);
+    if (!r.ok) { setStatus('ERR ' + (r.detail || 'list failed')); return; }
+    setStatus('OK ' + new Date().toLocaleTimeString() + ' (' + r.rooms.length + ' rooms)');
+    renderList(r.rooms);
+  } catch (e) { setStatus('ERR ' + e.message); }
+}
+
+function renderList(rooms) {
+  const filterMode = $('filter_mode').value;
+  const filtered = filterMode === 'all' ? rooms : rooms.filter(r => r.mode === filterMode);
+  if (filtered.length === 0) {
+    $('room-list').innerHTML = '<div class="empty">no rooms with this filter. Create one!</div>';
+    return;
+  }
+  let html = '';
+  filtered.forEach(r => {
+    const teamSize = modeSize(r.mode);
+    const isMine = r.creator_pid === myPid;
+    const filled = r.filled + '/' + (teamSize * 2);
+    const spec = r.spectators > 0 ? ' 👀 ' + r.spectators : '';
+    html += `<div class="room-card ${r.mode} ${r.status === 'done' ? 'done' : ''}">
+      <div>
+        <div class="room-name">${esc(r.name)} <span style="color:#888;font-size:11px">${r.room_id}</span>${isMine ? ' <span style="color:#ffcc00">[mine]</span>' : ''}</div>
+        <div style="color:#888;font-size:11px;margin-top:2px">
+          creator: ${esc(r.creator_pid).slice(-8)} · region: ${esc(r.region)} · created ${relTime(r.created_at)}${spec}
+        </div>
+      </div>
+      <div class="room-mode">${modeZh(r.mode)}</div>
+      <div class="room-progress">${filled} filled<br><span style="color:#888">${r.status}</span></div>
+      <div class="room-action">
+        ${r.status === 'lobby' && r.filled < teamSize * 2
+          ? (isMine
+              ? `<button class="cancel" onclick="cancelRoom('${r.room_id}')">cancel</button>`
+              : `<button onclick="joinRoom('${r.room_id}', 'blue')">join blue</button>
+                 <button onclick="joinRoom('${r.room_id}', 'red')">join red</button>`)
+          : (r.status === 'lobby' ? '<span style="color:#ffcc00">full — starting…</span>' : '<span style="color:#888">' + r.status + '</span>')}
+      </div>
+    </div>`;
+  });
+  $('room-list').innerHTML = html;
+}
+
+async function fetchMyRooms() {
+  if (!myPid) {
+    $('my-rooms').innerHTML = '<div class="empty">Provide pid+token URL params to see your rooms.</div>';
+    return;
+  }
+  // For MVP: list all rooms and filter by creator
+  const r = await call('/api/v1/room/list', 'GET', { status: 'lobby' });
+  if (!r.ok) return;
+  // Also fetch done/cancelled
+  const r2 = await call('/api/v1/room/list', 'GET', { status: 'done' });
+  const all = (r.rooms || []).concat(r2.rooms || []);
+  const mine = all.filter(x => x.creator_pid === myPid);
+  if (mine.length === 0) {
+    $('my-rooms').innerHTML = '<div class="empty">no rooms created yet</div>';
+    return;
+  }
+  let html = '';
+  mine.forEach(r => {
+    const teamSize = modeSize(r.mode);
+    const filled = r.filled + '/' + (teamSize * 2);
+    html += `<div style="padding:4px 8px;border-bottom:1px dotted #333;display:flex;justify-content:space-between">
+      <span>${esc(r.name)} <span style="color:#888;font-size:11px">${r.room_id} · ${r.mode} · ${filled} · ${r.status}</span></span>
+      <button class="cancel" style="background:#ff5f5f;color:white;border:none;padding:2px 6px;cursor:pointer" onclick="cancelRoom('${r.room_id}')">cancel</button>
+    </div>`;
+  });
+  $('my-rooms').innerHTML = html;
+}
+
+setInterval(fetchList, 3000);
+setInterval(fetchMyRooms, 5000);
+fetchList();
+fetchMyRooms();
+</script>
+</body>
+</html>
