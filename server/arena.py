@@ -448,6 +448,176 @@ def _use_ultimate(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> None:
         a.ult_cd = 60
 
 
+
+
+def _cast_summoner_spell(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> None:
+    """Use the agent's summoner spell (one-shot per match).
+
+    Each spell has a different effect triggered at the moment of use. The
+    effect itself may be instant or a short DoT/buff. Bots auto-cast their
+    spell when an opportunity arises (low HP → heal/smite, near enemy →
+    ignite, low HP under attack → barrier, etc.).
+    """
+    if a.spell_used or not a.spell or not a.alive:
+        return
+    spell = a.spell
+    a.spell_used = True
+    enemies = [e for e in (m.blue + m.red) if e.alive and e.team != a.team]
+
+    if spell == "heal":
+        before = a.hp
+        a.hp = min(a.hp_max, int(a.hp + a.hp_max * 0.40))
+        m.append_log(
+            f"💊 {a.name} ({a.team}) 召唤师 [治疗] 恢复 {a.hp - before} HP ({before}→{a.hp}) | 💊 {a.name} ({a.team}) SUMM Heal +{a.hp - before} HP ({before}→{a.hp})",
+            f"💊 {a.name} ({a.team}) SUMM Heal +{a.hp - before} HP ({before}→{a.hp})",
+        )
+    elif spell == "barrier":
+        a.shield_remaining = 60
+        m.append_log(
+            f"🛡️ {a.name} ({a.team}) 召唤师 [屏障] 吸收接下来 60 伤害 (8 tick) | 🛡️ {a.name} ({a.team}) SUMM Barrier absorbs next 60 dmg (8 ticks)",
+            f"🛡️ {a.name} ({a.team}) SUMM Barrier absorbs next 60 dmg (8 ticks)",
+        )
+    elif spell == "flash":
+        # Teleport up to 8 cells toward nearest enemy (or away from enemies)
+        if enemies:
+            target = min(enemies, key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
+            dx = (1 if target.pos[0] > a.pos[0] else (-1 if target.pos[0] < a.pos[0] else 0))
+            dy = (1 if target.pos[1] > a.pos[1] else (-1 if target.pos[1] < a.pos[1] else 0))
+            nx = max(1, min(ARENA_W - 2, a.pos[0] + dx * 8))
+            ny = max(1, min(ARENA_H - 2, a.pos[1] + dy * 8))
+            old_pos = a.pos
+            a.pos = (nx, ny)
+            m.append_log(
+                f"⚡ {a.name} ({a.team}) 召唤师 [闪现] 移动 {abs(nx-old_pos[0]) + abs(ny-old_pos[1])} 格 | ⚡ {a.name} ({a.team}) SUMM Flash moved {abs(nx-old_pos[0]) + abs(ny-old_pos[1])} cells",
+                f"⚡ {a.name} ({a.team}) SUMM Flash moved {abs(nx-old_pos[0]) + abs(ny-old_pos[1])} cells",
+            )
+    elif spell == "ignite" and enemies:
+        target = min(enemies, key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
+        a.ignite_target_pid = target.pid
+        a.ignite_ticks = 5
+        m.append_log(
+            f"🔥 {a.name} ({a.team}) 召唤师 [点燃] 烧 {target.name} ({target.team}) 80 伤害 / 5 tick | 🔥 {a.name} ({a.team}) SUMM Ignite burns {target.name} ({target.team}) 80 dmg over 5 ticks",
+            f"🔥 {a.name} ({a.team}) SUMM Ignite burns {target.name} ({target.team}) 80 dmg over 5 ticks",
+        )
+    elif spell == "exhaust" and enemies:
+        target = min(enemies, key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
+        a.weakened_target_pid = target.pid
+        a.weakened_ticks = 10
+        m.append_log(
+            f"💨 {a.name} ({a.team}) 召唤师 [虚弱] 弱化 {target.name} ({target.team}) -50% 攻击 10 tick | 💨 {a.name} ({a.team}) SUMM Exhaust weakens {target.name} ({target.team}) -50% atk 10 ticks",
+            f"💨 {a.name} ({a.team}) SUMM Exhaust weakens {target.name} ({target.team}) -50% atk 10 ticks",
+        )
+    elif spell == "ghost":
+        a.speed_boost_ticks = 15
+        m.append_log(
+            f"👻 {a.name} ({a.team}) 召唤师 [幽灵疾步] 速度 +30% (15 tick) | 👻 {a.name} ({a.team}) SUMM Ghost +30% move 15 ticks",
+            f"👻 {a.name} ({a.team}) SUMM Ghost +30% move 15 ticks",
+        )
+    elif spell == "smite" and enemies:
+        # Instant-kill any enemy under 15% HP within 6 cells
+        for e in enemies:
+            dist = abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1])
+            if dist <= 6 and e.hp / max(1, e.hp_max) < 0.15:
+                e.hp = 0
+                e.alive = False
+                e.deaths += 1
+                e.respawn_in = RESPAWN_TICKS
+                a.kills += 1
+                m.team_kills[a.team] += 1
+                a.gold += GOLD_PER_KILL
+                _try_buy_best_affordable(a, m)
+                m.append_log(
+                    f"💀 {a.name} ({a.team}) 召唤师 [晕跳] 处决 {e.name} ({e.team}) HP<15% | 💀 {a.name} ({a.team}) SUMM Smite executes {e.name} ({e.team}) (<15% HP)",
+                    f"💀 {a.name} ({a.team}) SUMM Smite executes {e.name} ({e.team}) (<15% HP)",
+                )
+                return  # one-shot
+    elif spell == "cleanse":
+        # No-op in MVP (no debuffs to clean)
+        m.append_log(
+            f"✨ {a.name} ({a.team}) 召唤师 [净化] 解除自身控制 (MVP no-op) | ✨ {a.name} ({a.team}) SUMM Cleanse (MVP no-op)",
+            f"✨ {a.name} ({a.team}) SUMM Cleanse (MVP no-op)",
+        )
+
+
+def _tick_spell_effects(m: ArenaMatch, tick_n: int) -> None:
+    """Apply per-tick effects of ongoing spells: ignite DoT, speed buff,
+    shield decay, exhaust tick, etc. Also auto-trigger spells on first
+    eligible tick.
+    """
+    for a in m.blue + m.red:
+        # Auto-trigger spell (if not used yet) when conditions are right
+        if not a.spell_used and a.spell and a.alive:
+            sp = a.spell
+            enemies = [e for e in (m.blue + m.red) if e.alive and e.team != a.team]
+            if sp == "heal" and a.hp / max(1, a.hp_max) < 0.40:
+                _cast_summoner_spell(a, m, tick_n)
+            elif sp == "barrier" and a.hp / max(1, a.hp_max) < 0.60:
+                _cast_summoner_spell(a, m, tick_n)
+            elif sp == "smite" and enemies:
+                for e in enemies:
+                    dist = abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1])
+                    if dist <= 6 and e.hp / max(1, e.hp_max) < 0.15:
+                        _cast_summoner_spell(a, m, tick_n)
+                        break
+            elif sp == "ignite" and enemies:
+                # Cast when an enemy is within 4 cells
+                target = min(enemies, key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
+                if abs(target.pos[0] - a.pos[0]) + abs(target.pos[1] - a.pos[1]) <= 4:
+                    _cast_summoner_spell(a, m, tick_n)
+            elif sp == "exhaust" and enemies:
+                target = min(enemies, key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
+                if abs(target.pos[0] - a.pos[0]) + abs(target.pos[1] - a.pos[1]) <= 3:
+                    _cast_summoner_spell(a, m, tick_n)
+            elif sp == "flash" and enemies:
+                # Flash away when very low HP
+                if a.hp / max(1, a.hp_max) < 0.20:
+                    _cast_summoner_spell(a, m, tick_n)
+            elif sp == "ghost" and tick_n == 5:
+                # Cast at start of match for early mobility
+                _cast_summoner_spell(a, m, tick_n)
+
+        # Tick ongoing effects
+        if a.ignite_ticks > 0:
+            target = next((e for e in (m.blue + m.red) if e.pid == a.ignite_target_pid), None)
+            if target and target.alive:
+                target.hp = max(0, target.hp - 16)  # 80 / 5 = 16/tick
+                a.ignite_ticks -= 1
+                if target.hp == 0:
+                    target.alive = False
+                    target.deaths += 1
+                    target.respawn_in = RESPAWN_TICKS
+                    a.kills += 1
+                    m.team_kills[a.team] += 1
+                    a.gold += GOLD_PER_KILL
+                    _try_buy_best_affordable(a, m)
+            else:
+                a.ignite_ticks = 0
+        if a.weakened_ticks > 0:
+            a.weakened_ticks -= 1
+        if a.speed_boost_ticks > 0:
+            a.speed_boost_ticks -= 1
+        # Shield decay happens on hit (see _combat_step)
+
+
+def _spell_atk_modifier(a: ArenaAgent) -> float:
+    """Return damage modifier (1.0 = no change) from active spell effects
+    on this agent. Exhaust reduces atk; barrier absorbs separately."""
+    if a.weakened_ticks > 0:
+        return 0.5  # -50% atk
+    return 1.0
+
+
+def _shield_absorb(a: ArenaAgent, incoming: int) -> int:
+    """Apply barrier shield to incoming damage; return the actual dmg taken."""
+    if a.shield_remaining > 0 and incoming > 0:
+        absorbed = min(a.shield_remaining, incoming)
+        a.shield_remaining -= absorbed
+        return incoming - absorbed
+    return incoming
+
+
+
+
 def _tick_ultimates(m: ArenaMatch, tick_n: int) -> None:
     """Decrement all ultimates' cooldowns; trigger bot use when off-CD."""
     for a in m.blue + m.red:
@@ -648,6 +818,49 @@ def _draft_tick_loop(draft_id: str) -> None:
         time.sleep(1.0)
 
 
+
+
+def _save_replay(m: ArenaMatch) -> None:
+    """Persist the entire match history to data/replays/<match_id>.json.
+
+    Each tick is a snapshot of agents, crystals, towers, dragons, buffs.
+    This is the source of truth for the /replay.html playback.
+    """
+    import json as _json
+    from pathlib import Path as _P
+    replay_dir = _P("data/replays")
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    snap_path = replay_dir / f"{m.match_id}.json"
+    out = {
+        "match_id": m.match_id,
+        "started_at": m.started_at,
+        "ended": m.ended,
+        "winner": m.winner,
+        "tick": m.tick,
+        "blue": [
+            {"pid": a.pid, "name": a.name, "cls": a.cls, "lane": a.lane,
+             "kills": a.kills, "deaths": a.deaths, "gold": a.gold,
+             "ultimate": a.ultimate, "ult_cd": a.ult_cd,
+             "spell": a.spell, "spell_used": a.spell_used,
+             "equipment": dict(a.equipment)}
+            for a in m.blue
+        ],
+        "red": [
+            {"pid": a.pid, "name": a.name, "cls": a.cls, "lane": a.lane,
+             "kills": a.kills, "deaths": a.deaths, "gold": a.gold,
+             "ultimate": a.ultimate, "ult_cd": a.ult_cd,
+             "spell": a.spell, "spell_used": a.spell_used,
+             "equipment": dict(a.equipment)}
+            for a in m.red
+        ],
+        "log": [
+            {"tick": t, "zh": m_zh, "en": m_en}
+            for (t, m_zh, m_en) in m.log
+        ],
+    }
+    snap_path.write_text(_json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _match_tick_loop(match_id: str) -> None:
     """Background loop that advances a single arena match by 1 tick/second.
     When the match ends, applies rank-rating updates for all 10 players."""
@@ -665,6 +878,11 @@ def _match_tick_loop(match_id: str) -> None:
                 apply_match_result(blue_pids, red_pids, m.winner or "blue")
             except Exception as ex:
                 print(f"[rank] failed to apply: {ex}")
+            # Save replay to disk
+            try:
+                _save_replay(m)
+            except Exception as ex:
+                print(f"[replay] failed to save: {ex}")
             return
         tick_match(m, rng)
         time.sleep(1.0)
@@ -711,6 +929,7 @@ def tick_match(m: ArenaMatch, rng: random.Random | None = None) -> None:
     _patrol_dragons(m)
     _respawn_step(m, tick_n)
     _expire_buffs(m, tick_n)
+    _tick_spell_effects(m, tick_n)
     _tick_ultimates(m, tick_n)
     _combat_step(m, rng, tick_n)
     _push_towers_step(m, tick_n)
@@ -867,6 +1086,8 @@ def _combat_step(m: ArenaMatch, rng: random.Random, tick_n: int) -> None:
         team_buff = m.team_buffs.get(a.team)
         if team_buff and team_buff.get("expires_at", 0) > tick_n:
             dmg = int(dmg * (1 + team_buff["dmg_pct"]))
+        # Apply summoner spell effects (exhaust on attacker, barrier on target)
+        dmg = int(dmg * _spell_atk_modifier(a))
         # Apply to target
         if kind == "dragon":
             target["hp"] -= dmg
@@ -893,6 +1114,9 @@ def _combat_step(m: ArenaMatch, rng: random.Random, tick_n: int) -> None:
             continue  # dragon combat resolved; don't fall through to enemy code
 
         # Enemy target hit
+        dmg = _shield_absorb(target, dmg)
+        if dmg <= 0:
+            continue
         target.hp -= dmg
         if target.hp <= 0:
             target.alive = False

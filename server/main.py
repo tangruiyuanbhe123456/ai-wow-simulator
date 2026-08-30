@@ -111,6 +111,27 @@ def arena_page():
     return FileResponse(str(WEB_DIR / "arena.html"))
 
 
+@app.get("/draft")
+@app.get("/draft.html")
+def draft_page():
+    """Ban/pick draft UI for live human-controlled picks."""
+    return FileResponse(str(WEB_DIR / "draft.html"))
+
+
+@app.get("/leaderboard")
+@app.get("/leaderboard.html")
+def leaderboard_page():
+    """Ranked leaderboard UI (placeholder — created in v4)."""
+    return FileResponse(str(WEB_DIR / "leaderboard.html"))
+
+
+@app.get("/replay")
+@app.get("/replay.html")
+def replay_page():
+    """Match replay UI (placeholder — created in v4)."""
+    return FileResponse(str(WEB_DIR / "replay.html"))
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "ts": time.time(), "version": "1.0.0"}
@@ -621,6 +642,41 @@ def arena_draft_spell(draft_id: str, lang: str = Query("zh"), pid: str = Query(.
     return r
 
 
+
+
+
+@app.get("/api/v1/replay/list")
+def replay_list(lang: str = Query("en")):
+    """List all saved match replays on disk."""
+    from pathlib import Path as _P
+    replay_dir = _P("data/replays")
+    if not replay_dir.exists():
+        return {"ok": True, "lang": lang, "replays": []}
+    out = []
+    for f in sorted(replay_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
+        out.append({
+            "match_id": f.stem,
+            "size_kb": round(f.stat().st_size / 1024, 1),
+            "mtime": f.stat().st_mtime,
+        })
+    return {"ok": True, "lang": lang, "replays": out}
+
+
+@app.get("/api/v1/replay/{match_id}")
+def replay_get(match_id: str, lang: str = Query("en")):
+    """Get the full saved replay for a match."""
+    from pathlib import Path as _P
+    import json as _json
+    snap = _P("data/replays") / f"{match_id}.json"
+    if not snap.exists():
+        raise HTTPException(404, f"replay {match_id} not found")
+    try:
+        data = _json.loads(snap.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(500, f"replay parse failed: {e}")
+    return {"ok": True, "lang": lang, "replay": data}
+
+
 @app.get("/api/v1/rank/leaderboard")
 def rank_leaderboard(lang: str = Query("en"), limit: int = Query(20)):
     """Top players by rank_rating."""
@@ -638,6 +694,321 @@ def rank_leaderboard(lang: str = Query("en"), limit: int = Query(20)):
             for r in rows
         ],
     }
+
+
+
+
+
+@app.post("/api/v1/trade/offer")
+def trade_offer(req: Request,
+                to_pid: str = Query(...),
+                gold: int = Query(0, ge=0, le=10000),
+                items: str = Query("{}"),  # JSON: {slot: item_id} from offerer
+                lang: str = Query("en")):
+    """Player A offers gold+items to player B. Returns offer_id (B can accept)."""
+    import json as _json
+    import secrets as _sec
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        from_pid = row["player_id"]
+        if from_pid == to_pid:
+            raise HTTPException(400, "cannot trade with yourself")
+        # Verify offerer has enough gold
+        cur.execute("SELECT gold FROM players WHERE id=?", (from_pid,))
+        fr = cur.fetchone()
+        if fr is None or fr["gold"] < gold:
+            raise HTTPException(400, f"insufficient gold (have {fr['gold'] if fr else 0}, need {gold})")
+        # Parse items JSON
+        try:
+            items_dict = _json.loads(items) if items else {}
+        except Exception:
+            raise HTTPException(400, "items must be JSON object {slot: item_id}")
+        if not isinstance(items_dict, dict):
+            raise HTTPException(400, "items must be dict")
+        # Check offerer owns those items
+        for slot, item_id in items_dict.items():
+            cur.execute(f"SELECT equipment FROM players WHERE id=?", (from_pid,))
+            r = cur.fetchone()
+            # Equipment is stored as a JSON column; for MVP we just trust the offerer
+        offer_id = "trd_" + _sec.token_hex(4)
+        cur.execute("""INSERT INTO trade_offers
+                       (id, from_pid, to_pid, gold, items, status, created_at)
+                       VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
+                    (offer_id, from_pid, to_pid, gold, _json.dumps(items_dict), time.time()))
+        c.commit()
+    return {
+        "ok": True, "lang": lang, "offer_id": offer_id,
+        "from_pid": from_pid, "to_pid": to_pid,
+        "gold": gold, "items": items_dict, "status": "pending",
+    }
+
+
+@app.get("/api/v1/trade/list")
+def trade_list(req: Request, lang: str = Query("en")):
+    """List all pending trade offers involving me (as from or to)."""
+    import json as _json
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        pid = row["player_id"]
+        cur.execute("""SELECT id, from_pid, to_pid, gold, items, status, created_at
+                       FROM trade_offers
+                       WHERE (from_pid=? OR to_pid=?) AND status='pending'
+                       ORDER BY created_at DESC LIMIT 50""", (pid, pid))
+        rows = cur.fetchall()
+    out = []
+    for r in rows:
+        out.append({
+            "offer_id": r["id"], "from_pid": r["from_pid"], "to_pid": r["to_pid"],
+            "gold": r["gold"], "items": _json.loads(r["items"]),
+            "status": r["status"], "created_at": r["created_at"],
+        })
+    return {"ok": True, "lang": lang, "offers": out}
+
+
+@app.post("/api/v1/trade/accept")
+def trade_accept(req: Request, offer_id: str = Query(...), lang: str = Query("en")):
+    """Recipient accepts the trade — gold/items swap."""
+    import json as _json
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        pid = row["player_id"]
+        cur.execute("SELECT * FROM trade_offers WHERE id=?", (offer_id,))
+        offer = cur.fetchone()
+        if offer is None:
+            raise HTTPException(404, "offer not found")
+        if offer["to_pid"] != pid:
+            raise HTTPException(403, "only the recipient can accept")
+        if offer["status"] != "pending":
+            raise HTTPException(400, f"offer is {offer['status']}, cannot accept")
+        # Atomic: deduct gold from from_pid, add to to_pid; items are logged
+        # but not auto-merged (MVP: items stay with offerer; trade is a
+        # social commitment, like Honor-of-Kings trading).
+        cur.execute("UPDATE players SET gold = gold - ? WHERE id=? AND gold >= ?",
+                    (offer["gold"], offer["from_pid"], offer["gold"]))
+        if cur.rowcount == 0:
+            raise HTTPException(400, "offerer no longer has the gold")
+        cur.execute("UPDATE players SET gold = gold + ? WHERE id=?",
+                    (offer["gold"], offer["to_pid"]))
+        cur.execute("UPDATE trade_offers SET status='accepted' WHERE id=?", (offer_id,))
+        cur.execute("""INSERT INTO trade_history
+                       (offer_id, from_pid, to_pid, gold, items, completed_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (offer_id, offer["from_pid"], offer["to_pid"],
+                     offer["gold"], offer["items"], time.time()))
+        c.commit()
+    return {"ok": True, "lang": lang, "offer_id": offer_id, "status": "accepted"}
+
+
+@app.post("/api/v1/trade/cancel")
+def trade_cancel(req: Request, offer_id: str = Query(...), lang: str = Query("en")):
+    """Offerer cancels a pending offer."""
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        pid = row["player_id"]
+        cur.execute("SELECT from_pid, status FROM trade_offers WHERE id=?", (offer_id,))
+        offer = cur.fetchone()
+        if offer is None:
+            raise HTTPException(404, "offer not found")
+        if offer["from_pid"] != pid:
+            raise HTTPException(403, "only the offerer can cancel")
+        if offer["status"] != "pending":
+            raise HTTPException(400, f"offer is {offer['status']}, cannot cancel")
+        cur.execute("UPDATE trade_offers SET status='cancelled' WHERE id=?", (offer_id,))
+        c.commit()
+    return {"ok": True, "lang": lang, "offer_id": offer_id, "status": "cancelled"}
+
+
+@app.get("/api/v1/trade/history")
+
+
+
+
+@app.post("/api/v1/friends/request")
+def friends_request(req: Request, friend_pid: str = Query(...), lang: str = Query("en")):
+    """Send a friend request. Creates a pending entry."""
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        owner = row["player_id"]
+        if owner == friend_pid:
+            raise HTTPException(400, "cannot friend yourself")
+        cur.execute("SELECT id FROM players WHERE id=?", (friend_pid,))
+        if cur.fetchone() is None:
+            raise HTTPException(404, "friend player not found")
+        # Check if already exists (in either direction)
+        cur.execute("SELECT status FROM friends WHERE owner_pid=? AND friend_pid=?",
+                    (owner, friend_pid))
+        existing = cur.fetchone()
+        if existing:
+            if existing["status"] == "pending":
+                return {"ok": True, "lang": lang, "status": "already_pending"}
+            if existing["status"] == "accepted":
+                return {"ok": True, "lang": lang, "status": "already_friends"}
+        # Auto-accept if reverse request exists
+        cur.execute("SELECT status FROM friends WHERE owner_pid=? AND friend_pid=?",
+                    (friend_pid, owner))
+        rev = cur.fetchone()
+        if rev and rev["status"] == "pending":
+            # Accept both sides
+            cur.execute("UPDATE friends SET status='accepted' WHERE owner_pid=? AND friend_pid=?",
+                        (friend_pid, owner))
+            cur.execute("INSERT OR IGNORE INTO friends (owner_pid, friend_pid, status, created_at) VALUES (?, ?, 'accepted', ?)",
+                        (owner, friend_pid, time.time()))
+            c.commit()
+            return {"ok": True, "lang": lang, "status": "accepted"}
+        # Otherwise create pending
+        cur.execute("""INSERT OR REPLACE INTO friends
+                       (owner_pid, friend_pid, status, created_at)
+                       VALUES (?, ?, 'pending', ?)""",
+                    (owner, friend_pid, time.time()))
+        c.commit()
+    return {"ok": True, "lang": lang, "status": "pending"}
+
+
+@app.get("/api/v1/friends/list")
+def friends_list(req: Request, lang: str = Query("en")):
+    """List my accepted friends + incoming pending requests."""
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        pid = row["player_id"]
+        # Friends I sent
+        cur.execute("""SELECT f.friend_pid, p.name, p.rank_rating, p.rank_tier, f.status, f.created_at
+                       FROM friends f JOIN players p ON p.id=f.friend_pid
+                       WHERE f.owner_pid=? ORDER BY f.created_at DESC""", (pid,))
+        my_friends = cur.fetchall()
+        # Pending incoming (someone sent to me)
+        cur.execute("""SELECT f.owner_pid, p.name, p.rank_rating, p.rank_tier, f.status, f.created_at
+                       FROM friends f JOIN players p ON p.id=f.owner_pid
+                       WHERE f.friend_pid=? AND f.status='pending' ORDER BY f.created_at DESC""", (pid,))
+        incoming = cur.fetchall()
+    return {
+        "ok": True, "lang": lang,
+        "my_friends": [
+            {"pid": r["friend_pid"], "name": r["name"],
+             "rank_rating": r["rank_rating"], "rank_tier": r["rank_tier"],
+             "status": r["status"], "since": r["created_at"]}
+            for r in my_friends
+        ],
+        "incoming_requests": [
+            {"from_pid": r["owner_pid"], "name": r["name"],
+             "rank_rating": r["rank_rating"], "rank_tier": r["rank_tier"],
+             "status": r["status"], "since": r["created_at"]}
+            for r in incoming
+        ],
+    }
+
+
+@app.post("/api/v1/friends/remove")
+def friends_remove(req: Request, friend_pid: str = Query(...), lang: str = Query("en")):
+    """Remove a friend (delete both rows for the pair)."""
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        pid = row["player_id"]
+        cur.execute("DELETE FROM friends WHERE owner_pid=? AND friend_pid=?", (pid, friend_pid))
+        cur.execute("DELETE FROM friends WHERE owner_pid=? AND friend_pid=?", (friend_pid, pid))
+        c.commit()
+    return {"ok": True, "lang": lang, "status": "removed"}
+
+def trade_history(req: Request, lang: str = Query("en")):
+    """List my trade history (completed trades)."""
+    import json as _json
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        pid = row["player_id"]
+        cur.execute("""SELECT id, offer_id, from_pid, to_pid, gold, items, completed_at
+                       FROM trade_history
+                       WHERE from_pid=? OR to_pid=?
+                       ORDER BY completed_at DESC LIMIT 50""", (pid, pid))
+        rows = cur.fetchall()
+    out = []
+    for r in rows:
+        out.append({
+            "id": r["id"], "offer_id": r["offer_id"],
+            "from_pid": r["from_pid"], "to_pid": r["to_pid"],
+            "gold": r["gold"], "items": _json.loads(r["items"]),
+            "completed_at": r["completed_at"],
+        })
+    return {"ok": True, "lang": lang, "history": out}
+
 
 
 @app.get("/api/v1/rank/{pid}")
