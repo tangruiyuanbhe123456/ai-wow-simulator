@@ -154,9 +154,39 @@ CREATE INDEX IF NOT EXISTS idx_players_zone ON players(zone);
 CREATE INDEX IF NOT EXISTS idx_mobs_zone ON mobs(zone, alive);
 CREATE INDEX IF NOT EXISTS idx_combat_ts ON combat_log(id DESC);
 CREATE INDEX IF NOT EXISTS idx_chat_ts ON chat_log(id DESC);
+
+CREATE TABLE IF NOT EXISTS trade_offers (
+    id          TEXT PRIMARY KEY,
+    from_pid    TEXT NOT NULL,
+    to_pid      TEXT NOT NULL,
+    gold        INTEGER DEFAULT 0,
+    items       TEXT DEFAULT '{}',
+    status      TEXT DEFAULT 'pending',
+    created_at  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS trade_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    offer_id    TEXT NOT NULL,
+    from_pid    TEXT NOT NULL,
+    to_pid      TEXT NOT NULL,
+    gold        INTEGER DEFAULT 0,
+    items       TEXT DEFAULT '{}',
+    completed_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS friends (
+    owner_pid   TEXT NOT NULL,
+    friend_pid  TEXT NOT NULL,
+    status      TEXT DEFAULT 'pending',
+    created_at  REAL NOT NULL,
+    PRIMARY KEY (owner_pid, friend_pid)
+);
+
 """
 
 
 def ensure_schema(conn) -> None:
     conn.executescript(SCHEMA_SQL)
     conn.commit()
+
