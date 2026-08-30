@@ -116,8 +116,9 @@ class Draft:
                     "ban": self.bans.get("red"),
                     "picks": list(self.picks["red"]),
                 },
-                "assignments": dict(self.assignments),
+"assignments": dict(self.assignments),
                 "spells": dict(self.spells),
+                "remaining_ticks": max(0, DRAFT_TIMEOUT_TICKS - self.tick),
                 "log": [
                     {"tick": t, "msg": m_zh if lang == "zh" else m_en}
                     for (t, m_zh, m_en) in self.log[-20:]
