@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>5v5 录播回放 / Match Replay</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.replay-list { padding: 10px; }
+.replay-item {
+  padding: 6px 10px; margin: 4px 0; background: #1a2030;
+  border: 1px solid #333; display: flex; justify-content: space-between; cursor: pointer;
+}
+.replay-item:hover { background: #2a3040; }
+.replay-detail { padding: 12px; background: #0a0e14; border: 1px solid #333; margin-top: 12px; }
+.summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.team-block { padding: 8px; border: 1px solid #333; background: #050810; }
+.team-block.blue { border-left: 3px solid #5fb3d4; }
+.team-block.red { border-left: 3px solid #ff5f5f; }
+.team-block h3 { margin-bottom: 6px; font-size: 14px; }
+.log-list { max-height: 400px; overflow-y: auto; background: #050810; padding: 8px; font-size: 12px; }
+.log-list .kill { color: #ff5f5f; }
+.log-list .dragon { color: #ffcc00; }
+.log-list .ult { color: #ff5fff; }
+.log-list .equip { color: #ffd700; }
+</style>
+</head>
+<body>
+<div id="app" style="max-width:1200px;margin:0 auto;padding:12px">
+<header>
+  <h1>5v5 录播回放 <span class="en">| Match Replay</span></h1>
+  <div id="controls">
+    <a href="/" style="color:#5fb3d4">← Back</a>
+    <a href="/leaderboard.html" style="color:#5fafff">/leaderboard</a>
+    <span id="status">loading...</span>
+  </div>
+</header>
+
+<div class="replay-list">
+  <h2>已保存的比赛 / Saved matches</h2>
+  <div id="replay-items">loading...</div>
+</div>
+
+<div id="replay-detail" class="replay-detail" style="display:none"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function fetchList() {
+  try {
+    const r = await fetch('/api/v1/replay/list');
+    const d = await r.json();
+    $('status').textContent = 'OK ' + new Date().toLocaleTimeString() + ' (' + d.replays.length + ' replays)';
+    if (d.replays.length === 0) {
+      $('replay-items').innerHTML = '<div style="color:#888;padding:20px;text-align:center">暂无比赛. Run 5v5_demo to generate one. / 没比赛. 跑 5v5 demo.</div>';
+      return;
+    }
+    let html = '';
+    d.replays.forEach(r => {
+      const dt = new Date(r.mtime * 1000).toLocaleString();
+      html += `<div class="replay-item" onclick="loadReplay('${r.match_id}')">
+        <span><b style="color:#5fafff">${r.match_id}</b> <span style="color:#888">${r.size_kb} KB</span></span>
+        <span style="color:#666">${dt}</span>
+      </div>`;
+    });
+    $('replay-items').innerHTML = html;
+  } catch (e) { $('status').textContent = 'ERR ' + e.message; }
+}
+
+async function loadReplay(matchId) {
+  try {
+    const r = await fetch('/api/v1/replay/' + encodeURIComponent(matchId) + '?lang=en');
+    const d = await r.json();
+    if (!d.ok) { alert('replay error: ' + d.detail); return; }
+    renderReplay(d.replay);
+  } catch (e) { alert('load ERR: ' + e.message); }
+}
+
+function renderReplay(r) {
+  const det = $('replay-detail');
+  det.style.display = 'block';
+  const winner = r.winner ? `<span style="color:#ffcc00;font-size:20px">🏆 ${r.winner.toUpperCase()} WON</span>` : '';
+  const startDt = new Date(r.started_at * 1000).toLocaleString();
+  let html = `<h2>${r.match_id} ${winner}</h2>
+    <p>Started: ${startDt} | Ended: ${r.ended ? 'Yes' : 'No'} | Final tick: ${r.tick}</p>`;
+
+  // Team summary
+  html += '<div class="summary-grid">';
+  for (const team of ['blue', 'red']) {
+    const list = r[team];
+    html += `<div class="team-block ${team}"><h3 style="color:${team === 'blue' ? '#5fb3d4' : '#ff5f5f'}">${team.toUpperCase()}</h3>`;
+    list.forEach(a => {
+      const equip = Object.entries(a.equipment || {}).filter(([k, v]) => v).map(([k, v]) => `${k}:${v}`).join(', ') || 'none';
+      html += `<div style="padding:4px;border-bottom:1px dotted #333;font-size:12px">
+        <b>${escapeHtml(a.name)}</b> <span style="color:#888">[${a.cls}/${a.lane}]</span><br>
+        KDA: ${a.kills}/${a.deaths} | Gold: ${a.gold} | Ult: ${a.ultimate || '?'} (cd=${a.ult_cd})<br>
+        Spell: ${a.spell || '?'} | Equipment: <span style="color:#ffd700">${equip}</span>
+      </div>`;
+    });
+    html += '</div>';
+  }
+  html += '</div>';
+
+  // Event log
+  html += '<h3 style="margin-top:12px">Event log / 事件流</h3><div class="log-list">';
+  (r.log || []).forEach(e => {
+    const msg = e.zh || e.en;
+    let cls = '';
+    if (msg.includes('击杀') || msg.includes('killed')) cls = 'kill';
+    else if (msg.includes('龙') || msg.includes('dragon')) cls = 'dragon';
+    else if (msg.includes('大招') || msg.includes('ULT')) cls = 'ult';
+    else if (msg.includes('购买') || msg.includes('bought')) cls = 'equip';
+    html += `<div class="${cls}">[t=${e.tick}] ${escapeHtml(msg)}</div>`;
+  });
+  html += '</div>';
+
+  det.innerHTML = html;
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[<>&"']/g, c => ({'<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+
+fetchList();
+setInterval(fetchList, 5000);
+</script>
+</body>
+</html>
