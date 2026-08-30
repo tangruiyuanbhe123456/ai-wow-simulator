@@ -585,6 +585,9 @@ def arena_drafts_list(lang: str = Query("zh")):
     return {"ok": True, "drafts": out, "heroes": [
         {"id": h[0], "name_zh": h[1], "name_en": h[2]}
         for h in _draft_mod.HERO_POOL
+    ], "spells": [
+        {"id": s[0], "name_zh": s[1], "name_en": s[2], "effect": s[3], "desc_zh": s[4]}
+        for s in _draft_mod.SPELL_POOL
     ]}
 
 
@@ -606,6 +609,55 @@ def arena_draft_pick(draft_id: str, lang: str = Query("zh"), pid: str = Query(..
     if not r.get("ok"):
         raise HTTPException(400, r.get("error", "fail"))
     return r
+
+
+@app.post("/api/v1/arena/draft/{draft_id}/spell")
+def arena_draft_spell(draft_id: str, lang: str = Query("zh"), pid: str = Query(...), spell: str = Query(...)):
+    """Submit a summoner spell pick (one per player, per match)."""
+    from server import arena_draft as _draft_mod
+    r = _draft_mod.submit_spell(draft_id, pid, spell, lang)
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("error", "fail"))
+    return r
+
+
+@app.get("/api/v1/rank/leaderboard")
+def rank_leaderboard(lang: str = Query("en"), limit: int = Query(20)):
+    """Top players by rank_rating."""
+    with _db_lock:
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, rank_rating, rank_tier, wins, losses "
+                    "FROM players ORDER BY rank_rating DESC LIMIT ?", (limit,))
+        rows = cur.fetchall()
+    return {
+        "ok": True, "lang": lang,
+        "leaderboard": [
+            {"pid": r["id"], "name": r["name"], "rank_rating": r["rank_rating"],
+             "rank_tier": r["rank_tier"], "wins": r["wins"], "losses": r["losses"]}
+            for r in rows
+        ],
+    }
+
+
+@app.get("/api/v1/rank/{pid}")
+def player_rank(pid: str, lang: str = Query("en")):
+    """Get a player's ranked rating + tier."""
+    with _db_lock:
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, rank_rating, rank_tier, wins, losses "
+                    "FROM players WHERE id=?", (pid,))
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(404, "player not found")
+    return {
+        "ok": True, "lang": lang,
+        "pid": row["id"], "name": row["name"],
+        "rank_rating": row["rank_rating"],
+        "rank_tier": row["rank_tier"],
+        "wins": row["wins"], "losses": row["losses"],
+    }
 
 
 @app.get("/api/v1/arena/matches")
