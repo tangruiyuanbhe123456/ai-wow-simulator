@@ -51,6 +51,112 @@ LANE_Y = {"top": 8, "mid": 25, "bot": 42}  # y coordinate of each lane corridor
 TOWER_HP = {"outer": 200, "inner": 400}
 TOWER_DMG_PER_TICK = 5  # when an agent is in tower's push range
 
+# Equipment catalog — 6 slots × 3 tiers. Buying a piece grants permanent stat
+# boosts (atk for weapon, hp_max for chest/helm, move bonus for boots, etc.).
+# Equipment is bought with gold earned via kills (50g) / deaths (-10g tax).
+# MVP: bots auto-buy the best available piece they can afford each tick.
+EQUIPMENT_CATALOG = {
+    "weapon": [
+        ("rusty_blade",     200,  {"atk": 3}),
+        ("iron_sword",      500,  {"atk": 7}),
+        ("dragon_slayer",   1200, {"atk": 15}),
+    ],
+    "helm": [
+        ("cloth_cap",       150,  {"hp_max": 10}),
+        ("iron_helm",       400,  {"hp_max": 25}),
+        ("dragon_helm",     900,  {"hp_max": 60}),
+    ],
+    "chest": [
+        ("leather_vest",    150,  {"hp_max": 15}),
+        ("iron_plate",      450,  {"hp_max": 40}),
+        ("dragon_scale",    1000, {"hp_max": 80}),
+],
+    "boots": [
+        ("cloth_boots",     100,  {"speed": 1}),   # speed not modeled; +atk as proxy
+        ("swift_boots",     300,  {"speed": 2, "atk": 2}),
+        ("dragon_talons",   700,  {"speed": 3, "atk": 4}),
+    ],
+    "trinket": [
+        ("lucky_charm",     200,  {"atk": 2, "hp_max": 10}),
+        ("hero_medal",      500,  {"atk": 5, "hp_max": 20}),
+        ("dragon_eye",      1100, {"atk": 10, "hp_max": 50}),
+    ],
+    "skin": [
+        ("basic_skin",      0,    {}),  # free / cosmetic only
+        ("fancy_skin",      250,  {"atk": 1}),
+        ("legendary_skin",  800,  {"atk": 3, "hp_max": 15}),
+    ],
+}
+
+# Per-hero ultimates — each class gets 1 ultimate ability, 60-tick cooldown
+# after use. Triggered automatically when off-cooldown (bots always use
+# when they can).
+ULTIMATES = {
+    # class -> (ult_id, zh_name, en_name, effect_func_name)
+    "warrior": ("warrior_charge",   "冲锋陷阵",  "Heroic Charge",   "Charge to nearest enemy (8 cells). Stun for 2 ticks."),
+    "mage":    ("mage_meteor",      "陨石天降",  "Meteor Strike",   "Deal 80 dmg in 5-cell radius at nearest enemy position."),
+    "priest":  ("priest_resurrect", "神圣复活",  "Divine Resurrection", "Revive any dead ally on the field (full HP, no respawn wait)."),
+    "hunter":  ("hunter_snipe",     "致命狙击",  "Hunter's Snipe",  "Snipe lowest-HP enemy from any distance for 70 dmg + 1.5x crit."),
+}
+
+# Gold rewards
+GOLD_PER_KILL = 50
+GOLD_ON_DEATH = 0    # lose gold tax could be added in v2
+
+# Ranked tier table — Honor-of-Kings-inspired.
+# Rating ranges (inclusive lower bound, exclusive upper bound):
+RANK_TIERS = [
+    (0,    "青铜 I",   "Bronze I"),
+    (200,  "青铜 II",  "Bronze II"),
+    (400,  "白银 I",   "Silver I"),
+    (600,  "白银 II",  "Silver II"),
+    (800,  "黄金 I",   "Gold I"),
+    (1000, "黄金 II",  "Gold II"),
+    (1200, "铂金 I",   "Platinum I"),
+    (1400, "铂金 II",  "Platinum II"),
+    (1600, "钻石 I",   "Diamond I"),
+    (1800, "钻石 II",  "Diamond II"),
+    (2000, "星耀",     "Star"),
+    (2200, "王者",     "King"),
+]
+
+
+def rating_to_tier(rating: int) -> str:
+    """Return the tier name for the given rating."""
+    tier_en = "Bronze I"
+    for thr, _zh, en in RANK_TIERS:
+        if rating >= thr:
+            tier_en = en
+    return tier_en
+
+
+def apply_match_result(blue_pids: list, red_pids: list, winner: str) -> None:
+    """Update each player's rank_rating / wins / losses after a 5v5 match.
+
+    Uses simplified Elo: winner +25, loser -15. Plus shared w/l record.
+    """
+    from server.db import connect as _db_connect
+    c = _db_connect()
+    cur = c.cursor()
+    for pid in blue_pids:
+        delta = 25 if winner == "blue" else -15
+        cur.execute("UPDATE players SET rank_rating = rank_rating + ?, "
+                    "wins = wins + ?, losses = losses + ? WHERE id=?",
+                    (delta, 1 if winner == "blue" else 0,
+                     1 if winner == "red" else 0, pid))
+    for pid in red_pids:
+        delta = 25 if winner == "red" else -15
+        cur.execute("UPDATE players SET rank_rating = rank_rating + ?, "
+                    "wins = wins + ?, losses = losses + ? WHERE id=?",
+                    (delta, 1 if winner == "red" else 0,
+                     1 if winner == "blue" else 0, pid))
+    # Recompute tiers for everyone
+    cur.execute("SELECT id, rank_rating FROM players")
+    for row in cur.fetchall():
+        cur.execute("UPDATE players SET rank_tier=? WHERE id=?",
+                    (rating_to_tier(row["rank_rating"]), row["id"]))
+    c.commit()
+
 
 @dataclass
 class ArenaAgent:
@@ -68,6 +174,27 @@ class ArenaAgent:
     kills: int = 0
     deaths: int = 0
     respawn_in: int = 0   # ticks until respawn
+    # Equipment system — 6 slots; each grants stat boosts. Bought with gold
+    # earned via kills/death tickets. Cosmetic in MVP; affects atk/hp_max.
+    gold: int = 500      # starting gold (enough for one tier-1 item)
+    equipment: dict = field(default_factory=lambda: {
+        "weapon": None, "helm": None, "chest": None,
+        "boots": None, "trinket": None, "skin": None,
+    })
+    # Ultimate skill (per-hero) — loaded from ULTIMATES at match start.
+    ultimate: str = ""        # ultimate_id, e.g. "warrior_charge"
+    ult_cd: int = 0          # ticks until ready (0 = ready)
+    # Summoner spell (chosen during draft)
+    spell: str = ""          # spell_id, e.g. "flash"
+    spell_used: bool = False  # one-shot per match
+    # Status effects (from summoner spells or ultimates)
+    shield_remaining: int = 0  # barrier absorb amount
+    speed_boost_ticks: int = 0  # ghost remaining
+    ignite_target_pid: str = ""  # who we're igniting
+    ignite_ticks: int = 0
+    weakened_target_pid: str = ""  # who we exhausted
+    weakened_ticks: int = 0
+    low_hp_smite_used: bool = False  # smite already used
 
 
 @dataclass
@@ -163,6 +290,12 @@ class ArenaMatch:
             "pos": list(a.pos), "alive": a.alive,
             "kills": a.kills, "deaths": a.deaths,
             "respawn_in": a.respawn_in,
+            "gold": a.gold,
+            "equipment": dict(a.equipment),
+            "ultimate": a.ultimate,
+            "ult_cd": a.ult_cd,
+            "spell": a.spell,
+            "spell_used": a.spell_used,
         }
 
     def _log_view(self, t: int, m_zh: str, m_en: str, lang: str) -> dict:
@@ -174,6 +307,154 @@ class ArenaMatch:
             # Keep last 200 events.
             if len(self.log) > 200:
                 self.log = self.log[-200:]
+
+
+def _recompute_agent_stats(a: ArenaAgent) -> None:
+    """Recompute a's atk and hp_max from base + equipment + buffs."""
+    base_atk = 14
+    base_hp_max = 100
+    bonus_atk = 0
+    bonus_hp = 0
+    for slot, item_id in (a.equipment or {}).items():
+        if not item_id:
+            continue
+        for item_name, _cost, stats in EQUIPMENT_CATALOG.get(slot, []):
+            if item_name == item_id:
+                bonus_atk += stats.get("atk", 0)
+                bonus_hp += stats.get("hp_max", 0)
+                break
+    # New max — preserve current HP ratio so the agent doesn't get a free heal
+    ratio = (a.hp / a.hp_max) if a.hp_max else 1.0
+    a.hp_max = base_hp_max + bonus_hp
+    a.hp = max(1, int(a.hp_max * ratio))
+    a.atk = base_atk + bonus_atk
+
+
+def _try_buy_best_affordable(a: ArenaAgent, m: ArenaMatch) -> bool:
+    """Bot AI: if agent has gold and an empty equipment slot, buy the best
+    piece in that slot they can afford. Returns True if bought anything."""
+    if not a.alive:
+        return False
+    bought = False
+    for slot in list(a.equipment.keys()):
+        if a.equipment[slot] is not None:
+            continue  # already filled
+        catalog = EQUIPMENT_CATALOG.get(slot, [])
+        # Pick the most expensive item the agent can afford
+        best = None
+        for item_name, cost, stats in catalog:
+            if a.gold >= cost and (best is None or cost > best[1]):
+                best = (item_name, cost, stats)
+        if best is None:
+            continue
+        a.equipment[slot] = best[0]
+        a.gold -= best[1]
+        _recompute_agent_stats(a)
+        m.append_log(
+            f"🛒 {a.name} ({a.team}) 购买 [{slot}:{best[0]}] (-{best[1]}g, atk={a.atk} hp_max={a.hp_max}) | 🛒 {a.name} ({a.team}) bought [{slot}:{best[0]}] (-{best[1]}g, atk={a.atk} hp_max={a.hp_max})",
+            f"🛒 {a.name} ({a.team}) bought [{slot}:{best[0]}] (-{best[1]}g, atk={a.atk} hp_max={a.hp_max})",
+        )
+        bought = True
+    return bought
+
+
+def _use_ultimate(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> None:
+    """Bot AI: trigger the agent's ultimate if off-cooldown.
+
+    Each hero class has a unique ult with a powerful effect (high dmg / heal /
+    stun / revive). After use, set a 60-tick cooldown.
+    """
+    if a.ult_cd > 0 or not a.alive or not a.ultimate:
+        return
+    ult_id = a.ultimate
+    if ult_id == "warrior_charge":
+        # Charge to nearest enemy (8 cells), stun them for 2 ticks.
+        enemies = [e for e in (m.blue + m.red) if e.alive and e.team != a.team]
+        if not enemies:
+            return
+        target = min(enemies, key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
+        dist = abs(target.pos[0] - a.pos[0]) + abs(target.pos[1] - a.pos[1])
+        if dist > 12:
+            return  # too far, save ult for closer fight
+        # Apply stun (modeled as respawn timer of 2 ticks... actually use
+        # a separate stun state — for simplicity we deal +30 dmg + knockback)
+        dmg = 30 + a.atk
+        target.hp -= dmg
+        m.append_log(
+            f"⚡ {a.name} ({a.team}) 大招 冲锋陷阵! 冲向 {target.name} ({target.team}) 伤害 {dmg} (cd=60) | ⚡ {a.name} ({a.team}) ULT Heroic Charge! Hits {target.name} for {dmg} (cd=60)",
+            f"⚡ {a.name} ({a.team}) ULT Heroic Charge! Hits {target.name} for {dmg} (cd=60)",
+        )
+        if target.hp <= 0:
+            target.alive = False
+            target.deaths += 1
+            target.respawn_in = RESPAWN_TICKS
+            a.kills += 1
+            m.team_kills[a.team] += 1
+            a.gold += GOLD_PER_KILL
+            _try_buy_best_affordable(a, m)
+        a.ult_cd = 60
+    elif ult_id == "mage_meteor":
+        enemies = [e for e in (m.blue + m.red) if e.alive and e.team != a.team]
+        if not enemies:
+            return
+        target = min(enemies, key=lambda e: abs(e.pos[0] - a.pos[0]) + abs(e.pos[1] - a.pos[1]))
+        if abs(target.pos[0] - a.pos[0]) + abs(target.pos[1] - a.pos[1]) > 20:
+            return
+        # 80 dmg to enemies in 5-cell radius
+        import math as _math
+        hit = [e for e in (m.blue + m.red) if e.alive and e.team != a.team
+               and _math.hypot(e.pos[0] - target.pos[0], e.pos[1] - target.pos[1]) <= 5]
+        for h in hit:
+            h.hp -= 80
+        m.append_log(
+            f"⚡ {a.name} ({a.team}) 大招 陨石天降! 命中 {len(hit)} 人 各 80 伤害 (cd=60) | ⚡ {a.name} ({a.team}) ULT Meteor Strike! Hits {len(hit)} enemies for 80 each (cd=60)",
+            f"⚡ {a.name} ({a.team}) ULT Meteor Strike! Hits {len(hit)} enemies for 80 each (cd=60)",
+        )
+        a.ult_cd = 60
+    elif ult_id == "priest_resurrect":
+        # Revive any dead ally on the field
+        allies = [x for x in (m.blue if a.team == "blue" else m.red) if not x.alive]
+        if not allies:
+            return
+        ally = allies[0]  # revive first dead ally
+        ally.alive = True
+        ally.hp = ally.hp_max
+        ally.respawn_in = 0
+        m.append_log(
+            f"⚡ {a.name} ({a.team}) 大招 神圣复活! {ally.name} ({ally.team}) 满血复活 (cd=60) | ⚡ {a.name} ({a.team}) ULT Divine Resurrection! {ally.name} ({ally.team}) back at full HP (cd=60)",
+            f"⚡ {a.name} ({a.team}) ULT Divine Resurrection! {ally.name} ({ally.team}) back at full HP (cd=60)",
+        )
+        a.ult_cd = 60
+    elif ult_id == "hunter_snipe":
+        # Snipe lowest-HP enemy from any distance
+        enemies = [e for e in (m.blue + m.red) if e.alive and e.team != a.team]
+        if not enemies:
+            return
+        target = min(enemies, key=lambda e: e.hp)
+        dmg = int(70 * 1.5)  # 105 dmg (1.5x crit)
+        target.hp -= dmg
+        m.append_log(
+            f"⚡ {a.name} ({a.team}) 大招 致命狙击! 命中 {target.name} ({target.team}) 105 伤害 (cd=60) | ⚡ {a.name} ({a.team}) ULT Snipe! Hits {target.name} ({target.team}) for 105 (cd=60)",
+            f"⚡ {a.name} ({a.team}) ULT Snipe! Hits {target.name} ({target.team}) for 105 (cd=60)",
+        )
+        if target.hp <= 0:
+            target.alive = False
+            target.deaths += 1
+            target.respawn_in = RESPAWN_TICKS
+            a.kills += 1
+            m.team_kills[a.team] += 1
+            a.gold += GOLD_PER_KILL
+            _try_buy_best_affordable(a, m)
+        a.ult_cd = 60
+
+
+def _tick_ultimates(m: ArenaMatch, tick_n: int) -> None:
+    """Decrement all ultimates' cooldowns; trigger bot use when off-CD."""
+    for a in m.blue + m.red:
+        if a.ult_cd > 0:
+            a.ult_cd = max(0, a.ult_cd - 1)
+        if a.ult_cd == 0 and a.alive:
+            _use_ultimate(a, m, tick_n)
 
 
 # ---------- module-level state: queue + active matches ----------
@@ -270,6 +551,19 @@ def form_match_from_draft(draft_id: str, lookup_agent) -> ArenaMatch | None:
     for i, a in enumerate(red):
         a.lane = LANES[i % 3]
 
+    # Load per-agent ultimate (by base class) and summoner spell (from draft)
+    for a in blue + red:
+        ult_data = ULTIMATES.get(a.cls)
+        if ult_data:
+            a.ultimate = ult_data[0]
+            a.ult_cd = 0  # ready immediately
+        # Default spell if draft didn't set one
+        spell_id = d.spells.get(a.pid, "heal")
+        a.spell = spell_id
+        a.spell_used = False
+        # Initialize stats from base
+        _recompute_agent_stats(a)
+
     # Build 6 towers (3 lanes × 2 teams × 2 kinds)
     towers = []
     for team in ("blue", "red"):
@@ -355,7 +649,8 @@ def _draft_tick_loop(draft_id: str) -> None:
 
 
 def _match_tick_loop(match_id: str) -> None:
-    """Background loop that advances a single arena match by 1 tick/second."""
+    """Background loop that advances a single arena match by 1 tick/second.
+    When the match ends, applies rank-rating updates for all 10 players."""
     import random as _r
     rng = _r.Random()
     while True:
@@ -363,6 +658,13 @@ def _match_tick_loop(match_id: str) -> None:
         if m is None:
             return
         if m.ended:
+            # Apply rank-rating updates
+            try:
+                blue_pids = [a.pid for a in m.blue]
+                red_pids = [a.pid for a in m.red]
+                apply_match_result(blue_pids, red_pids, m.winner or "blue")
+            except Exception as ex:
+                print(f"[rank] failed to apply: {ex}")
             return
         tick_match(m, rng)
         time.sleep(1.0)
@@ -406,8 +708,10 @@ def tick_match(m: ArenaMatch, rng: random.Random | None = None) -> None:
         tick_n = m.tick
 
     _spawn_dragons(m, tick_n)
+    _patrol_dragons(m)
     _respawn_step(m, tick_n)
     _expire_buffs(m, tick_n)
+    _tick_ultimates(m, tick_n)
     _combat_step(m, rng, tick_n)
     _push_towers_step(m, tick_n)
     _check_crystals(m, tick_n)
@@ -433,6 +737,26 @@ def _spawn_dragons(m: ArenaMatch, tick_n: int) -> None:
             f"🐉 {zh} 在河道刷新! ({DRAGON_HP[kind]} HP, 击杀全队 +{int(DRAGON_REWARD[kind]['dmg_pct']*100)}% 伤害 {DRAGON_REWARD[kind]['duration']} tick) | 🐉 {en} spawned in river! ({DRAGON_HP[kind]} HP, kill gives team +{int(DRAGON_REWARD[kind]['dmg_pct']*100)}% dmg for {DRAGON_REWARD[kind]['duration']} ticks)",
             f"🐉 {en} spawned in river! ({DRAGON_HP[kind]} HP, kill gives team +{int(DRAGON_REWARD[kind]['dmg_pct']*100)}% dmg for {DRAGON_REWARD[kind]['duration']} ticks)"
         )
+
+
+def _patrol_dragons(m: ArenaMatch) -> None:
+    """Dragons wander around the center river lane each tick (Honor-of-Kings).
+    This makes the fight feel alive — agents have to chase a moving target.
+    Dragons are slow (1 cell per 2 ticks) and stay within the river corridor.
+    """
+    import random as _r
+    for d in m.dragons:
+        # Use deterministic motion based on (kind, tick) so each dragon has a
+        # unique wander path. Speed = 1 cell per 2 ticks.
+        seed_val = (hash(d["kind"]) ^ (m.tick // 2)) & 0xFFFFFFFF
+        rng = _r.Random(seed_val)
+        dx = rng.choice([-1, 0, 0, 1])   # bias to stay
+        dy = rng.choice([-1, 0, 0, 1])
+        # Restrict to river corridor: x in [mid-river band], y anywhere
+        x0, y0 = d["pos"]
+        nx = max(ARENA_W // 2 - 5, min(ARENA_W // 2 + 5, x0 + dx))
+        ny = max(5, min(ARENA_H - 5, y0 + dy))
+        d["pos"] = [nx, ny]
 
 
 def _expire_buffs(m: ArenaMatch, tick_n: int) -> None:
@@ -548,13 +872,14 @@ def _combat_step(m: ArenaMatch, rng: random.Random, tick_n: int) -> None:
             target["hp"] -= dmg
             target["last_hit_team"] = a.team
             if target["hp"] <= 0:
-                # Dragon slain — apply buff to killer's team
+                # Dragon slain — apply buff to killer's team + reward gold
                 _apply_buff(m, a.team, target["kind"], tick_n)
+                a.gold += 200  # dragon kill bonus
                 dragon_zh = ("小龙" if target["kind"] == "young" else "大龙")
                 dragon_en = ("Young Dragon" if target["kind"] == "young" else "Elder Dragon")
                 m.append_log(
-                    f"🐉 {a.name} ({a.team}) 击杀 {dragon_zh}! 团队获得 +{int(DRAGON_REWARD[target['kind']]['dmg_pct']*100)}% 伤害 buff ({DRAGON_REWARD[target['kind']]['duration']} tick) | 🐉 {a.name} ({a.team}) slayed {dragon_en}! Team gets +{int(DRAGON_REWARD[target['kind']]['dmg_pct']*100)}% dmg buff ({DRAGON_REWARD[target['kind']]['duration']} ticks)",
-                    f"🐉 {a.name} ({a.team}) slayed {dragon_en}! Team gets +{int(DRAGON_REWARD[target['kind']]['dmg_pct']*100)}% dmg buff ({DRAGON_REWARD[target['kind']]['duration']} ticks)",
+                    f"🐉 {a.name} ({a.team}) 击杀 {dragon_zh}! 团队获得 +{int(DRAGON_REWARD[target['kind']]['dmg_pct']*100)}% 伤害 buff ({DRAGON_REWARD[target['kind']]['duration']} tick) +200g | 🐉 {a.name} ({a.team}) slayed {dragon_en}! Team gets +{int(DRAGON_REWARD[target['kind']]['dmg_pct']*100)}% dmg buff ({DRAGON_REWARD[target['kind']]['duration']} ticks) +200g",
+                    f"🐉 {a.name} ({a.team}) slayed {dragon_en}! Team gets +{int(DRAGON_REWARD[target['kind']]['dmg_pct']*100)}% dmg buff ({DRAGON_REWARD[target['kind']]['duration']} ticks) +200g",
                 )
                 # Remove from dragons list
                 m.dragons[:] = [d for d in m.dragons if d["kind"] != target["kind"]]
@@ -576,10 +901,15 @@ def _combat_step(m: ArenaMatch, rng: random.Random, tick_n: int) -> None:
             target.respawn_in = RESPAWN_TICKS
             a.kills += 1
             m.team_kills[a.team] += 1
+            # Gold rewards
+            a.gold += GOLD_PER_KILL
+            target.gold = max(0, target.gold + GOLD_ON_DEATH)
             m.append_log(
-                f"{a.name} ({a.team}) 击杀 {target.name} ({target.team}) 暴击={crit} 伤害={dmg} | {a.name} ({a.team}) killed {target.name} ({target.team}) crit={crit} dmg={dmg}",
-                f"{a.name} ({a.team}) killed {target.name} ({target.team}) crit={crit} dmg={dmg}",
+                f"{a.name} ({a.team}) 击杀 {target.name} ({target.team}) 暴击={crit} 伤害={dmg} +{GOLD_PER_KILL}g | {a.name} ({a.team}) killed {target.name} ({target.team}) crit={crit} dmg={dmg} +{GOLD_PER_KILL}g",
+                f"{a.name} ({a.team}) killed {target.name} ({target.team}) crit={crit} dmg={dmg} +{GOLD_PER_KILL}g",
             )
+            # Try to buy equipment with the gold
+            _try_buy_best_affordable(a, m)
         else:
             if tick_n % 2 == 0:
                 m.append_log(

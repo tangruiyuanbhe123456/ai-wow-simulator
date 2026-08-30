@@ -21,6 +21,11 @@ CREATE TABLE IF NOT EXISTS players (
     guild_id    TEXT,
     party_id    TEXT,
     pvp_flag    INTEGER DEFAULT 0,
+    -- Ranked system (Honor-of-Kings-inspired)
+    rank_rating INTEGER DEFAULT 1000,
+    rank_tier   TEXT DEFAULT 'bronze',
+    wins        INTEGER DEFAULT 0,
+    losses      INTEGER DEFAULT 0,
     created_at  REAL NOT NULL,
     last_seen   REAL NOT NULL
 );
