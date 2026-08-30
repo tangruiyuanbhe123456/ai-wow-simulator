@@ -59,6 +59,20 @@ DRAFT_TIMEOUT_TICKS = 60  # 1 minute at 1s tick
 PICKS_PER_TEAM = 5
 BANS_PER_TEAM = 1
 
+# Summoner spells — Honor-of-Kings-equivalent. Each player picks 1 (chosen
+# during draft phase). Effects trigger during the match; tracked in
+# ArenaAgent.spell. Cooldown-locked (1 use per match unless noted).
+SPELL_POOL = [
+    ("flash",      "闪现",     "Flash",       "blink_to_base_or_ally", "Teleport up to 8 cells (works only for self/ally)."),
+    ("heal",       "治疗",     "Heal",        "heal_self",             "Restore 40% HP to self."),
+    ("ignite",     "点燃",     "Ignite",      "burn_target",           "Deal 80 dmg over 5 ticks to nearest enemy."),
+    ("exhaust",    "虚弱",     "Exhaust",     "weaken_target",         "Reduce nearest enemy's atk by 50% for 10 ticks."),
+    ("ghost",      "幽灵疾步", "Ghost",       "speed_boost",           "+30% move speed for 15 ticks."),
+    ("cleanse",    "净化",     "Cleanse",     "cleanse_debuffs",       "Remove all debuffs and cc from self."),
+    ("barrier",    "屏障",     "Barrier",     "shield_self",           "Absorb 60 dmg for 8 ticks."),
+    ("smite",      "晕跳",     "Smite",       "execute_low_hp",        "Instant-kill any enemy under 15% HP (within 6 cells)."),
+]
+
 
 @dataclass
 class Draft:
@@ -70,8 +84,9 @@ class Draft:
     bans: dict = field(default_factory=lambda: {"blue": None, "red": None})
     # Picked heroes (in order of submission, hero_id strings)
     picks: dict = field(default_factory=lambda: {"blue": [], "red": []})
-    # Which player pid chose which hero
+    # Which player pid chose which hero + which spell
     assignments: dict = field(default_factory=dict)   # pid -> hero_id
+    spells: dict = field(default_factory=dict)        # pid -> spell_id
     started_at: float = 0.0
     tick: int = 0
     ended: bool = False
@@ -102,6 +117,7 @@ class Draft:
                     "picks": list(self.picks["red"]),
                 },
                 "assignments": dict(self.assignments),
+                "spells": dict(self.spells),
                 "log": [
                     {"tick": t, "msg": m_zh if lang == "zh" else m_en}
                     for (t, m_zh, m_en) in self.log[-20:]
@@ -178,6 +194,28 @@ def submit_ban(draft_id: str, team: str, hero_id: str, lang: str = "zh") -> dict
     return {"ok": True, "draft_id": draft_id, "team": team, "ban": hero_id}
 
 
+def submit_spell(draft_id: str, pid: str, spell_id: str, lang: str = "zh") -> dict:
+    """A player picks their summoner spell (one per player, per match)."""
+    d = get_draft(draft_id)
+    if d is None or d.ended:
+        return {"ok": False, "error": "draft not found or ended"}
+    if pid not in d.blue_pids + d.red_pids:
+        return {"ok": False, "error": "player not in this draft"}
+    valid_ids = [s[0] for s in SPELL_POOL]
+    if spell_id not in valid_ids:
+        return {"ok": False, "error": f"unknown spell_id; choose from {valid_ids}"}
+    if pid in d.spells:
+        return {"ok": False, "error": "you already picked a spell"}
+    d.spells[pid] = spell_id
+    spell_zh = next(s[1] for s in SPELL_POOL if s[0] == spell_id)
+    spell_en = next(s[2] for s in SPELL_POOL if s[0] == spell_id)
+    d.append_log(
+        f"{pid} 选择召唤师技能 [{spell_zh}] ({spell_id}) | {pid} picked summoner [{spell_en}] ({spell_id})",
+        f"{pid} picked summoner [{spell_en}] ({spell_id})",
+    )
+    return {"ok": True, "draft_id": draft_id, "pid": pid, "spell": spell_id}
+
+
 def submit_pick(draft_id: str, pid: str, hero_id: str, lang: str = "zh") -> dict:
     """A player picks a hero for themselves.
 
@@ -222,7 +260,9 @@ def submit_pick(draft_id: str, pid: str, hero_id: str, lang: str = "zh") -> dict
 
 
 def auto_fill_remaining(d: Draft) -> None:
-    """Auto-pick random allowed heroes for any unpicked players (timeout fallback)."""
+    """Auto-pick random allowed heroes for any unpicked players (timeout fallback).
+    Also auto-assigns a default summoner spell (heal) for any player who
+    didn't pick one."""
     if d.ended:
         return
     banned = set(filter(None, (d.bans["blue"], d.bans["red"])))
@@ -250,6 +290,11 @@ def auto_fill_remaining(d: Draft) -> None:
             f"⏰ {pid} ({team}) 超时自动选 {hero_zh} | ⏰ {pid} ({team}) auto-picked {hero_en} (timeout)",
             f"⏰ {pid} ({team}) auto-picked {hero_en} (timeout)",
         )
+
+    # Default spell = heal for players who didn't pick
+    for pid in d.blue_pids + d.red_pids:
+        if pid not in d.spells:
+            d.spells[pid] = "heal"
 
     if d.picks_made >= PICKS_PER_TEAM * 2:
         d.ended = True
