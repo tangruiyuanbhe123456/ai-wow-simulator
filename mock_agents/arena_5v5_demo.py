@@ -79,12 +79,14 @@ def run_arena_demo(base_url: str):
         return
 
     # Get hero pool
-    print(f"\nStep 2.5: fetch hero pool")
+    print(f"\nStep 2.5: fetch hero + spell pool")
     pool_r = http_json(f"{base_url}/api/v1/arena/drafts")
     heroes = pool_r.get("heroes", [])
-    print(f"  hero pool ({len(heroes)} heroes):")
-    for h in heroes:
-        print(f"    - {h['id']:14s}  {h['name_zh']} | {h['name_en']}")
+    spells = pool_r.get("spells", [])
+    print(f"  hero pool ({len(heroes)} heroes)")
+    print(f"  spell pool ({len(spells)} spells):")
+    for s in spells:
+        print(f"    - {s['id']:14s}  {s['name_zh']} | {s['name_en']} — {s.get('desc_zh','')}")
 
     # Submit bans
     print(f"\nStep 3: bans")
@@ -129,6 +131,23 @@ def run_arena_demo(base_url: str):
         time.sleep(0.05)
     print(f"  → picks_made={picks_made} (others will auto-pick if needed)")
 
+    # Submit spell picks — each player picks 1 summoner spell
+    print(f"\nStep 4.5: spell picks (1 per player)")
+    spell_plan = ["flash", "heal", "ignite", "ghost", "exhaust"]   # blue picks
+    spell_plan += ["barrier", "cleanse", "smite", "exhaust", "flash"]  # red picks
+    spell_made = 0
+    for pid, spell in zip(blue_pids + red_pids, spell_plan):
+        r = http_json(f"{base_url}/api/v1/arena/draft/{draft_id}/spell",
+                      method="POST",
+                      params=[("lang", "zh"), ("pid", pid), ("spell", spell)])
+        if r.get("ok"):
+            spell_made += 1
+            team = "blue" if pid in blue_pids else "red"
+            print(f"  ✓ {team} {pid[-8:]}... picks spell [{spell}] ({spell_made}/10)")
+        else:
+            print(f"  ✗ {pid[-8:]}... picks spell [{spell}]: {r.get('error')}")
+        time.sleep(0.05)
+
     # Step 5 — wait for draft to end + match to start
     print(f"\nStep 5: polling match state")
     match_id = None
@@ -169,7 +188,8 @@ def run_arena_demo(base_url: str):
             buffs = s.get("buffs", {})
             extra = ""
             if dragons:
-                extra += f"  🐉 [{', '.join(d['kind']+':'+str(d['hp']) for d in dragons)}]"
+                dragon_pos = ", ".join(f"{d['kind']}@{d['pos']}" for d in dragons)
+                extra += f"  🐉 [{dragon_pos}]"
             if buffs:
                 extra += f"  ⚡ {buffs}"
             print(f"  t={t:3d} blue={blue_alive}/5 hp={blue_hp:4d} kills={score_b}  "
@@ -184,6 +204,10 @@ def run_arena_demo(base_url: str):
             print(f"   kills: blue={s['team_kills']['blue']}, red={s['team_kills']['red']}")
             print(f"   crystal damage: blue={s['team_dmg_to_crystal']['blue']}, "
                   f"red={s['team_dmg_to_crystal']['red']}")
+            # Show equipment/spell/ult for the first agent on each team
+            for a in s['blue'][:1] + s['red'][:1]:
+                equip = ', '.join(f"{k}:{v}" for k, v in a['equipment'].items() if v) or 'none'
+                print(f"   {a['team']} {a['name']}: gold={a.get('gold')} ult={a.get('ultimate')}(cd={a.get('ult_cd')}) spell={a.get('spell')}(used={a.get('spell_used')}) equip=[{equip}]")
             return
         time.sleep(0.5)
     print("  ! Timed out waiting for match to end")
