@@ -183,6 +183,32 @@ CREATE TABLE IF NOT EXISTS friends (
     PRIMARY KEY (owner_pid, friend_pid)
 );
 
+
+CREATE TABLE IF NOT EXISTS match_rooms (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    mode        TEXT NOT NULL DEFAULT '5v5',   -- '1v1' | '3v3' | '5v5'
+    status      TEXT NOT NULL DEFAULT 'lobby', -- 'lobby' | 'draft' | 'live' | 'done' | 'cancelled'
+    creator_pid TEXT NOT NULL,
+    region      TEXT DEFAULT 'global',
+    created_at  REAL NOT NULL,
+    started_at  REAL,
+    ended_at    REAL,
+    winner      TEXT,                          -- 'blue' | 'red' | NULL
+    match_id    TEXT,                          -- FK to match once started
+    FOREIGN KEY (creator_pid) REFERENCES players(id)
+);
+
+CREATE TABLE IF NOT EXISTS match_room_players (
+    room_id     TEXT NOT NULL,
+    pid         TEXT NOT NULL,
+    team        TEXT NOT NULL,                 -- 'blue' | 'red' | 'spectator'
+    joined_at   REAL NOT NULL,
+    PRIMARY KEY (room_id, pid),
+    FOREIGN KEY (room_id) REFERENCES match_rooms(id),
+    FOREIGN KEY (pid) REFERENCES players(id)
+);
+
 """
 
 
