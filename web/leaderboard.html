@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>排位赛排行榜 / Ranked Leaderboard</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.lb-container { max-width: 1100px; margin: 0 auto; }
+.lb-tier {
+  margin-bottom: 12px; padding: 10px;
+  border: 1px solid #333; background: #0a0e14;
+}
+.lb-tier h2 { color: #ffcc00; font-size: 16px; margin-bottom: 8px; }
+.lb-tier.bronze { border-left: 4px solid #cd7f32; }
+.lb-tier.silver { border-left: 4px solid #c0c0c0; }
+.lb-tier.gold { border-left: 4px solid #ffd700; }
+.lb-tier.platinum { border-left: 4px solid #4dd0e1; }
+.lb-tier.diamond { border-left: 4px solid #b388ff; }
+.lb-tier.star { border-left: 4px solid #ff5f5f; }
+.lb-tier.king { border-left: 4px solid #ffcc00; background: linear-gradient(90deg, rgba(255,204,0,0.1), transparent); }
+.lb-row {
+  display: grid; grid-template-columns: 50px 1fr 100px 80px 80px 100px;
+  gap: 8px; padding: 4px 8px; font-size: 13px; border-bottom: 1px dotted #333;
+  align-items: center;
+}
+.lb-row:hover { background: #1a2030; }
+.lb-row.header { color: #888; font-weight: bold; }
+.lb-row.top-1 { background: rgba(255,204,0,0.15); font-weight: bold; }
+.lb-row.top-2 { background: rgba(192,192,192,0.1); }
+.lb-row.top-3 { background: rgba(205,127,50,0.1); }
+.rank-cell { color: #ffcc00; font-weight: bold; }
+.winrate { color: #88ff88; }
+.lb-search { padding: 10px; background: #1a2030; margin-bottom: 12px; }
+.lb-search input {
+  background: #050810; color: #ffcc00; border: 1px solid #5fb3d4;
+  padding: 6px 10px; font-family: inherit; font-size: 13px; width: 300px;
+}
+.lb-search button {
+  background: #5fb3d4; color: #0a0e14; border: none; padding: 6px 12px;
+  font-weight: bold; cursor: pointer; margin-left: 6px;
+}
+</style>
+</head>
+<body>
+<div class="lb-container">
+<header>
+  <h1>排位赛排行榜 <span class="en">| Ranked Leaderboard</span></h1>
+  <div id="controls">
+    <a href="/" style="color:#5fb3d4">← Back to main observer</a>
+    <a href="/draft.html" style="color:#5fafff">/draft</a>
+    <a href="/replay.html" style="color:#5fafff">/replay</a>
+    <span id="status">loading...</span>
+  </div>
+</header>
+
+<div class="lb-search">
+  <input id="filter" type="text" placeholder="filter by name (regex)...">
+  <button onclick="applyFilter()">Filter</button>
+  <span style="color:#888;font-size:11px;margin-left:12px">Total players: <span id="total">0</span></span>
+</div>
+
+<div id="leaderboard">
+  <div style="text-align:center;color:#888;padding:40px">Loading leaderboard...</div>
+</div>
+
+<footer>
+  <p style="text-align:center;color:#666;font-size:11px;margin-top:24px">
+    段位由 rating (Elo) 决定 | Tier derived from Elo rating
+  </p>
+</footer>
+</div>
+
+<script>
+const TIER_ORDER = [
+  "Bronze I", "Bronze II",
+  "Silver I", "Silver II",
+  "Gold I", "Gold II",
+  "Platinum I", "Platinum II",
+  "Diamond I", "Diamond II",
+  "Star", "King",
+];
+const TIER_CSS_CLASS = {
+  "Bronze I": "bronze", "Bronze II": "bronze",
+  "Silver I": "silver", "Silver II": "silver",
+  "Gold I": "gold", "Gold II": "gold",
+  "Platinum I": "platinum", "Platinum II": "platinum",
+  "Diamond I": "diamond", "Diamond II": "diamond",
+  "Star": "star", "King": "king",
+};
+const TIER_ZH = {
+  "Bronze I": "青铜 I", "Bronze II": "青铜 II",
+  "Silver I": "白银 I", "Silver II": "白银 II",
+  "Gold I": "黄金 I", "Gold II": "黄金 II",
+  "Platinum I": "铂金 I", "Platinum II": "铂金 II",
+  "Diamond I": "钻石 I", "Diamond II": "钻石 II",
+  "Star": "星耀", "King": "王者",
+};
+
+let allPlayers = [];
+
+function winrate(p) {
+  const total = (p.wins || 0) + (p.losses || 0);
+  if (total === 0) return "—";
+  return Math.round((p.wins / total) * 100) + "%";
+}
+
+async function fetchLB() {
+  try {
+    const r = await fetch('/api/v1/rank/leaderboard?limit=200');
+    const d = await r.json();
+    allPlayers = d.leaderboard || [];
+    document.getElementById('status').textContent = 'OK ' + new Date().toLocaleTimeString();
+    document.getElementById('total').textContent = allPlayers.length;
+    render(allPlayers);
+  } catch (e) {
+    document.getElementById('status').textContent = 'ERR ' + e.message;
+  }
+}
+
+function render(players) {
+  // Group by tier
+  const byTier = {};
+  TIER_ORDER.forEach(t => { byTier[t] = []; });
+  players.forEach(p => {
+    const t = p.rank_tier || "Bronze I";
+    if (!byTier[t]) byTier[t] = [];
+    byTier[t].push(p);
+  });
+  // Sort each tier by rating desc
+  Object.keys(byTier).forEach(t => byTier[t].sort((a, b) => b.rank_rating - a.rank_rating));
+
+  const container = document.getElementById('leaderboard');
+  // Render in TIER_ORDER (King first since highest)
+  let html = '';
+  for (let i = TIER_ORDER.length - 1; i >= 0; i--) {
+    const t = TIER_ORDER[i];
+    const list = byTier[t];
+    if (list.length === 0) continue;
+    const cssClass = TIER_CSS_CLASS[t];
+    html += `<div class="lb-tier ${cssClass}"><h2>${TIER_ZH[t]} | ${t} (${list.length} players)</h2>`;
+    html += '<div class="lb-row header"><span>#</span><span>Name</span><span>Rating</span><span>W</span><span>L</span><span>Winrate</span></div>';
+    list.forEach((p, idx) => {
+      const rankClass = idx === 0 ? 'top-1' : idx === 1 ? 'top-2' : idx === 2 ? 'top-3' : '';
+      const globalRank = allPlayers.indexOf(p) + 1;
+      html += `<div class="lb-row ${rankClass}">
+        <span class="rank-cell">#${globalRank}</span>
+        <span>${escapeHtml(p.name)} <span style="color:#888;font-size:11px">(${p.pid.slice(-6)})</span></span>
+        <span style="color:#ffcc00">${p.rank_rating}</span>
+        <span class="winrate">${p.wins}</span>
+        <span style="color:#ff5f5f">${p.losses}</span>
+        <span>${winrate(p)}</span>
+      </div>`;
+    });
+    html += '</div>';
+  }
+  if (!html) html = '<div style="text-align:center;color:#888;padding:40px">No players yet. Run the 5v5 demo!</div>';
+  container.innerHTML = html;
+}
+
+function applyFilter() {
+  const q = document.getElementById('filter').value.trim();
+  if (!q) { render(allPlayers); return; }
+  try {
+    const re = new RegExp(q, 'i');
+    render(allPlayers.filter(p => re.test(p.name)));
+  } catch (e) {
+    render(allPlayers);
+  }
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[<>&"']/g, c => ({'<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+
+fetchLB();
+setInterval(fetchLB, 5000);
+</script>
+</body>
+</html>
