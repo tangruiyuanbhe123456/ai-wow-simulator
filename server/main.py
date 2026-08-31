@@ -146,6 +146,295 @@ def training_page():
     return FileResponse(str(WEB_DIR / "training.html"))
 
 
+
+
+
+@app.post("/api/v1/match/{match_id}/action")
+def human_action(match_id: str,
+                pid: str = Query(...),
+                action: str = Query(...),
+                lang: str = Query("en"),
+                payload: str = Query("{}")):
+    """Human-vs-bot mode: a player submits an action for their agent.
+
+    action: "move" | "attack" | "cast_spell" | "use_ult" | "buy_item" | "use_item_active"
+    payload (JSON): for move={"x":int,"y":int}; for attack={"target_pid":str};
+                     for buy_item={"slot":str,"item":str}; for use_item_active={} (uses current item active)
+    """
+    import json as _json
+    from server import arena as _arena_mod
+    payload_d = _json.loads(payload) if payload else {}
+    with _arena_mod._lock:
+        m = _arena_mod._active_matches.get(match_id)
+        if m is None:
+            raise HTTPException(404, "match not found or ended")
+        agent = next((a for a in (m.blue + m.red) if a.pid == pid), None)
+        if agent is None:
+            raise HTTPException(404, "your agent not in this match")
+        if action == "move":
+            x = int(payload_d.get("x", 0))
+            y = int(payload_d.get("y", 0))
+            agent.pos = (max(1, min(_arena_mod.ARENA_W - 2, x)),
+                         max(1, min(_arena_mod.ARENA_H - 2, y)))
+            result_msg = f"moved to ({x},{y})"
+        elif action == "attack":
+            target_pid = payload_d.get("target_pid", "")
+            target = next((a for a in (m.blue + m.red) if a.pid == target_pid), None)
+            if target is None or not target.alive:
+                raise HTTPException(400, "target not found or dead")
+            dmg = max(1, agent.atk)
+            target.hp = max(0, target.hp - dmg)
+            m.append_log(
+                f"👤 {agent.name} ({agent.team}) 人类玩家攻击 {target.name} ({target.team}) 伤害 {dmg} | 👤 {agent.name} ({agent.team}) human attacks {target.name} ({target.team}) for {dmg}",
+                f"👤 {agent.name} ({agent.team}) human attacks {target.name} ({target.team}) for {dmg}",
+            )
+            result_msg = f"dealt {dmg} dmg to {target.name}"
+            if target.hp == 0:
+                target.alive = False
+                target.deaths += 1
+                target.respawn_in = _arena_mod.RESPAWN_TICKS
+                agent.kills += 1
+                m.team_kills[agent.team] += 1
+                agent.gold += _arena_mod.GOLD_PER_KILL
+                _arena_mod._try_buy_best_affordable(agent, m)
+        elif action == "cast_spell":
+            if agent.spell_used:
+                raise HTTPException(400, "spell already used")
+            _arena_mod._cast_summoner_spell(agent, m, m.tick)
+            result_msg = f"spell {agent.spell} cast"
+        elif action == "use_ult":
+            if agent.ult_cd > 0:
+                raise HTTPException(400, f"ult on cooldown ({agent.ult_cd})")
+            _arena_mod._use_ultimate(agent, m, m.tick)
+            result_msg = f"ult {agent.ultimate} cast"
+        elif action == "buy_item":
+            slot = payload_d.get("slot", "")
+            item = payload_d.get("item", "")
+            if slot not in agent.equipment:
+                raise HTTPException(400, f"unknown slot {slot}")
+            # Find cost
+            from server.arena import EQUIPMENT_CATALOG
+            cost = next((e[1] for e in EQUIPMENT_CATALOG.get(slot, []) if e[0] == item), None)
+            if cost is None:
+                raise HTTPException(400, f"unknown item {item}")
+            if agent.gold < cost:
+                raise HTTPException(400, f"insufficient gold ({agent.gold}<{cost})")
+            agent.gold -= cost
+            agent.equipment[slot] = item
+            _arena_mod._recompute_agent_stats(agent)
+            m.append_log(
+                f"👤 {agent.name} 购买 [{slot}:{item}] (-{cost}g) | 👤 {agent.name} bought [{slot}:{item}] (-{cost}g)",
+                f"👤 {agent.name} bought [{slot}:{item}] (-{cost}g)",
+            )
+            result_msg = f"bought {item} for {cost}g"
+        elif action == "use_item_active":
+            _arena_mod._tick_item_actives_for_one(agent, m, m.tick)
+            result_msg = "tried to use item active"
+        else:
+            raise HTTPException(400, f"unknown action {action}")
+    return {"ok": True, "lang": lang, "pid": pid, "action": action, "result": result_msg,
+            "agent": {"pos": agent.pos, "hp": agent.hp, "gold": agent.gold,
+                      "ult_cd": agent.ult_cd, "spell_used": agent.spell_used}}
+
+
+
+
+
+
+@app.post("/api/v1/tournament/create")
+def tournament_create(req: Request,
+                      name: str = Query(...),
+                      size: int = Query(4, ge=2, le=16),
+                      mode: str = Query("5v5"),
+                      lang: str = Query("en")):
+    """Create a tournament (single-elimination bracket)."""
+    import secrets as _sec
+    from server.db import connect as _db
+    if size not in (2, 4, 8, 16):
+        raise HTTPException(400, "size must be 2/4/8/16")
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        creator = row["player_id"]
+        tid = "tour_" + _sec.token_hex(4)
+        cur.execute("""INSERT INTO tournaments
+                       (id, name, size, mode, status, creator_pid, created_at)
+                       VALUES (?, ?, ?, ?, 'registration', ?, ?)""",
+                    (tid, name, size, mode, creator, time.time()))
+        c.commit()
+    return {"ok": True, "lang": lang, "tournament_id": tid, "name": name, "size": size, "mode": mode}
+
+
+@app.post("/api/v1/tournament/{tid}/register_team")
+def tournament_register_team(req: Request,
+                              tid: str,
+                              team_name: str = Query(...),
+                              captain_pid: str = Query(...),
+                              players: str = Query("[]"),
+                              lang: str = Query("en")):
+    """Register a team for the tournament. `players` is JSON array of pids."""
+    import json as _json
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        creator = row["player_id"]
+        cur.execute("SELECT size, status FROM tournaments WHERE id=?", (tid,))
+        t = cur.fetchone()
+        if t is None:
+            raise HTTPException(404, "tournament not found")
+        if t["status"] != "registration":
+            raise HTTPException(400, f"tournament is {t['status']}, registration closed")
+        cur.execute("SELECT COUNT(*) AS c FROM tournament_teams WHERE tournament_id=?", (tid,))
+        cnt = cur.fetchone()["c"]
+        if cnt >= t["size"]:
+            raise HTTPException(400, f"tournament full ({cnt}/{t['size']})")
+        players_list = _json.loads(players) if players else []
+        team_id = cnt
+        cur.execute("""INSERT INTO tournament_teams
+                       (tournament_id, team_id, team_name, captain_pid, players, seed)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (tid, team_id, team_name, captain_pid, _json.dumps(players_list), team_id))
+        c.commit()
+    return {"ok": True, "lang": lang, "tournament_id": tid, "team_id": team_id,
+            "team_name": team_name, "registered": cnt + 1, "size": t["size"]}
+
+
+@app.post("/api/v1/tournament/{tid}/start")
+def tournament_start(req: Request, tid: str, lang: str = Query("en")):
+    """Start the tournament — generate bracket + create first-round matches."""
+    import json as _json, secrets as _sec
+    from server.db import connect as _db
+    from server import arena as _arena_mod
+    from server import arena_draft as _draft_mod
+    import threading as _th
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        creator = row["player_id"]
+        cur.execute("SELECT * FROM tournaments WHERE id=?", (tid,))
+        t = cur.fetchone()
+        if t is None:
+            raise HTTPException(404, "tournament not found")
+        if t["creator_pid"] != creator:
+            raise HTTPException(403, "only creator can start")
+        if t["status"] != "registration":
+            raise HTTPException(400, f"already {t['status']}")
+        cur.execute("SELECT * FROM tournament_teams WHERE tournament_id=? ORDER BY team_id", (tid,))
+        teams = cur.fetchall()
+        size = t["size"]
+        if len(teams) < size:
+            raise HTTPException(400, f"need {size} teams, only {len(teams)} registered (use bots to fill)")
+        # Build bracket: pair teams (0,1), (2,3), (4,5), ...
+        bracket = {"round0": [], "round1": []}
+        match_ids = {}
+        for i in range(0, size, 2):
+            t1 = teams[i]
+            t2 = teams[i + 1]
+            players1 = _json.loads(t1["players"]) or [t1["captain_pid"]]
+            players2 = _json.loads(t2["players"]) or [t2["captain_pid"]]
+            # Pad to mode size
+            mode_size = (1 if t["mode"] == "1v1" else (3 if t["mode"] == "3v3" else 5))
+            while len(players1) < mode_size:
+                players1.append("bot_" + _sec.token_hex(2))
+            while len(players2) < mode_size:
+                players2.append("bot_" + _sec.token_hex(2))
+            mid = "mtch_" + _sec.token_hex(4)
+            slot = f"r0_m{i//2}"
+            match_ids[slot] = mid
+            bracket["round0"].append({"slot": slot, "team1": t1["team_name"], "team2": t2["team_name"],
+                                      "match_id": mid})
+            # Create the draft for this match
+            draft = _draft_mod.create_draft(players1[:mode_size], players2[:mode_size], mode=t["mode"])
+            t1_th = _th.Thread(target=_arena_mod._draft_tick_loop, args=(draft.draft_id,),
+                               daemon=True, name=f"tdraft-{draft.draft_id}")
+            t1_th.start()
+        # Mark status in_progress and store bracket + match_ids
+        cur.execute("""UPDATE tournaments SET status='in_progress', started_at=?, bracket=?, matches=?
+                       WHERE id=?""",
+                    (time.time(), _json.dumps(bracket), _json.dumps(match_ids), tid))
+        c.commit()
+    return {"ok": True, "lang": lang, "tournament_id": tid, "bracket": bracket,
+            "matches": match_ids}
+
+
+@app.get("/api/v1/tournament/{tid}")
+def tournament_state(tid: str, lang: str = Query("en")):
+    """Get tournament state (bracket + teams + status)."""
+    import json as _json
+    from server.db import connect as _db
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT * FROM tournaments WHERE id=?", (tid,))
+        t = cur.fetchone()
+        if t is None:
+            raise HTTPException(404, "tournament not found")
+        cur.execute("SELECT * FROM tournament_teams WHERE tournament_id=? ORDER BY team_id", (tid,))
+        teams = cur.fetchall()
+    return {"ok": True, "lang": lang, "tournament": {k: t[k] for k in t.keys()},
+            "teams": [{"team_id": r["team_id"], "team_name": r["team_name"],
+                       "captain_pid": r["captain_pid"], "players": _json.loads(r["players"]),
+                       "eliminated": bool(r["eliminated"]), "seed": r["seed"]}
+                      for r in teams]}
+
+
+@app.get("/api/v1/tournaments")
+def tournament_list(lang: str = Query("en"), status: str = Query("registration")):
+    """List tournaments by status. (Plural URL to avoid /{tid} route conflict.)"""
+    from server.db import connect as _db
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("""SELECT id, name, mode, size, status, creator_pid, created_at
+                       FROM tournaments WHERE status=? ORDER BY created_at DESC LIMIT 50""", (status,))
+        rows = cur.fetchall()
+    return {"ok": True, "lang": lang,
+            "tournaments": [{"id": r["id"], "name": r["name"], "mode": r["mode"],
+                             "size": r["size"], "status": r["status"],
+                             "creator_pid": r["creator_pid"], "created_at": r["created_at"]}
+                            for r in rows]}
+
+
+
+@app.get("/trade")
+@app.get("/trade.html")
+def trade_page():
+    """Equipment trade UI (v8) — player↔player item + gold exchange."""
+    return FileResponse(str(WEB_DIR / "trade.html"))
+
+
+@app.get("/tournament")
+@app.get("/tournament.html")
+def tournament_page():
+    """Tournament bracket UI (v8)."""
+    return FileResponse(str(WEB_DIR / "tournament.html"))
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "ts": time.time(), "version": "1.0.0"}
