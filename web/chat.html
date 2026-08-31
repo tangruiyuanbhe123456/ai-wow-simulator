@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>聊天 / Chat (v9)</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.chat-container { max-width: 800px; margin: 0 auto; }
+.chat-header { padding: 12px; background: #1a2030; border: 1px solid #ffcc00; margin-bottom: 12px; }
+.chat-log { background: #0a0e14; padding: 12px; height: 500px; overflow-y: auto;
+  border: 1px solid #333; font-size: 14px; line-height: 1.6; }
+.chat-log .msg { padding: 4px 6px; margin-bottom: 4px; border-bottom: 1px dotted #222; }
+.chat-log .name { color: #ffcc00; font-weight: bold; margin-right: 8px; }
+.chat-log .ts { color: #5fafff; font-size: 11px; margin-right: 6px; }
+.chat-input-row { display: flex; gap: 6px; margin-top: 8px; }
+.chat-input-row input { flex: 1; background: #050810; color: #ffcc00; border: 1px solid #5fb3d4;
+  padding: 8px; font-family: inherit; font-size: 14px; }
+.chat-input-row button { background: #ffcc00; color: #0a0e14; border: none; padding: 8px 16px;
+  font-weight: bold; cursor: pointer; }
+.identity { padding: 8px; background: #1a2030; border: 1px solid #5fb3d4; margin-bottom: 8px; }
+.identity input { background: #050810; color: #ffcc00; border: 1px solid #5fb3d4;
+  padding: 4px 8px; font-family: inherit; }
+</style>
+</head>
+<body>
+<div class="chat-container">
+<header>
+  <h1>💬 全球聊天 <span class="en">| Global Chat (v9)</span></h1>
+  <div id="controls">
+    <a href="/" style="color:#5fb3d4">← Main</a>
+    <a href="/lobby.html" style="color:#5fafff">/lobby</a>
+    <span id="status">loading...</span>
+  </div>
+</header>
+
+<div class="identity">
+  <label>Your token (to chat):</label>
+  <input id="my_token" type="text" placeholder="bearer token (required to send)">
+  <label>Your pid (display name shown):</label>
+  <input id="my_pid" type="text" placeholder="pid (optional, for display)">
+  <button onclick="init()" style="background:#5fb3d4;color:#0a0e14;border:none;padding:4px 12px;cursor:pointer;font-weight:bold;margin-left:6px">Set 设置</button>
+</div>
+
+<div class="chat-header">
+  <h2 style="color:#ffcc00">Global Chat 全球聊天</h2>
+  <p style="font-size:13px">A spectator hangout. Anyone with a token can post.</p>
+</div>
+
+<div id="chat-log" class="chat-log"></div>
+
+<div class="chat-input-row">
+  <input id="msg-input" type="text" placeholder="type message (max 500 chars)..." onkeypress="if(event.key==='Enter')sendChat()">
+  <button onclick="sendChat()">发送 Send</button>
+</div>
+</div>
+
+<script>
+let myToken = null;
+let lastTs = 0;
+
+function setStatus(m) { document.getElementById('status').textContent = m; }
+
+function init() {
+  myToken = document.getElementById('my_token').value.trim();
+  setStatus(myToken ? 'ready (logged in)' : 'read-only mode');
+  fetchChat();
+}
+
+async function call(path, method='GET', body=null, params=null) {
+  if (params) {
+    const qs = new URLSearchParams(params).toString();
+    path += (path.includes('?') ? '&' : '?') + qs;
+  }
+  const headers = { 'Content-Type': 'application/json' };
+  if (myToken) headers['Authorization'] = 'Bearer ' + myToken;
+  const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  return await r.json();
+}
+
+async function sendChat() {
+  if (!myToken) { alert('需要 token 才能发 / need token to send'); return; }
+  const msg = document.getElementById('msg-input').value.trim();
+  if (!msg) return;
+  const r = await call('/api/v1/chat/send', 'POST', null, { message: msg, scope: 'global' });
+  if (r.ok) {
+    document.getElementById('msg-input').value = '';
+    fetchChat();
+  } else {
+    alert('failed: ' + (r.detail || JSON.stringify(r)));
+  }
+}
+
+async function fetchChat() {
+  try {
+    const r = await call('/api/v1/chat/list', 'GET', null, { scope: 'global', since: String(lastTs) });
+    if (!r.ok) return;
+    const log = document.getElementById('chat-log');
+    r.messages.reverse().forEach(m => {
+      const ts = new Date(m.ts * 1000).toLocaleTimeString();
+      const div = document.createElement('div');
+      div.className = 'msg';
+      div.innerHTML = '<span class="ts">[' + ts + ']</span><span class="name">' + escapeHtml(m.name) + '</span>' + escapeHtml(m.message);
+      log.appendChild(div);
+      lastTs = Math.max(lastTs, m.ts);
+    });
+    log.scrollTop = log.scrollHeight;
+  } catch (e) { setStatus('ERR ' + e.message); }
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[<>&"']/g, c => ({'<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+
+// Auto-init from URL
+(function init() {
+  const u = new URLSearchParams(location.search);
+  if (u.get('token')) document.getElementById('my_token').value = u.get('token');
+  init();
+})();
+
+setInterval(fetchChat, 1500);
+</script>
+</body>
+</html>
