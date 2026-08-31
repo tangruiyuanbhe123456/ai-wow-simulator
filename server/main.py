@@ -139,6 +139,13 @@ def lobby_page():
     return FileResponse(str(WEB_DIR / "lobby.html"))
 
 
+@app.get("/training")
+@app.get("/training.html")
+def training_page():
+    """AI training center UI (v7) — bot fitness + strategy evolution."""
+    return FileResponse(str(WEB_DIR / "training.html"))
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "ts": time.time(), "version": "1.0.0"}
@@ -965,6 +972,69 @@ def friends_list(req: Request, lang: str = Query("en")):
 
 
 @app.post("/api/v1/friends/remove")
+
+
+
+@app.get("/api/v1/training/stats")
+def training_stats(lang: str = Query("en"), limit: int = Query(20)):
+    """Top bots by fitness (last-match fitness + win/loss record)."""
+    import json as _json
+    from server.db import connect as _db
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("""SELECT pid, wins, losses, matches_played, fitness_history,
+                              hp_retreat_threshold, ult_teamfight_min_enemies, last_updated
+                       FROM bot_strategy_profiles
+                       ORDER BY wins DESC, last_updated DESC LIMIT ?""", (limit,))
+        rows = cur.fetchall()
+    out = []
+    for r in rows:
+        hist = _json.loads(r["fitness_history"])
+        last_fit = hist[-1] if hist else 0
+        avg_fit = sum(hist) / len(hist) if hist else 0
+        out.append({
+            "pid": r["pid"], "wins": r["wins"], "losses": r["losses"],
+            "matches": r["matches_played"],
+            "last_fitness": round(last_fit, 2),
+            "avg_fitness": round(avg_fit, 2),
+            "hp_retreat_threshold": round(r["hp_retreat_threshold"], 3),
+            "ult_teamfight_min_enemies": r["ult_teamfight_min_enemies"],
+            "last_updated": r["last_updated"],
+        })
+    return {"ok": True, "lang": lang, "bots": out}
+
+
+@app.get("/api/v1/training/bot/{pid}")
+def training_bot(pid: str, lang: str = Query("en")):
+    """Detailed training data for one bot."""
+    import json as _json
+    from server.db import connect as _db
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        row = cur.execute(
+            "SELECT * FROM bot_strategy_profiles WHERE pid=?", (pid,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "bot not found (no matches yet)")
+    keys = row.keys()
+    out = {k: row[k] for k in keys}
+    out["fitness_history"] = _json.loads(out["fitness_history"])
+    return {"ok": True, "lang": lang, "profile": out}
+
+
+@app.post("/api/v1/training/reset/{pid}")
+def training_reset(pid: str, lang: str = Query("en")):
+    """Reset a bot's training profile to defaults."""
+    from server.db import connect as _db
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("DELETE FROM bot_strategy_profiles WHERE pid=?", (pid,))
+        c.commit()
+    return {"ok": True, "lang": lang, "pid": pid, "status": "reset"}
+
 
 
 
