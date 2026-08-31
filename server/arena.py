@@ -14,6 +14,12 @@ i18n: zh / en labels via i18n.arena_msg().
 from __future__ import annotations
 import random
 import time
+from pathlib import Path as _Path
+try:
+    from server.config import DB_PATH as _DB_PATH_FROM_CONFIG
+    DB_PATH = _DB_PATH_FROM_CONFIG
+except Exception:
+    DB_PATH = _Path("data/world.db")
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -56,35 +62,36 @@ TOWER_DMG_PER_TICK = 5  # when an agent is in tower's push range
 # Equipment is bought with gold earned via kills (50g) / deaths (-10g tax).
 # MVP: bots auto-buy the best available piece they can afford each tick.
 EQUIPMENT_CATALOG = {
+    # slot: [(name, cost, stats_dict, active_skill_id, active_desc)]
     "weapon": [
-        ("rusty_blade",     200,  {"atk": 3}),
-        ("iron_sword",      500,  {"atk": 7}),
-        ("dragon_slayer",   1200, {"atk": 15}),
+        ("rusty_blade",     200,  {"atk": 3},                       None, None),
+        ("iron_sword",      500,  {"atk": 7},                       "blade_burst", "Next attack deals 2x dmg (30 tick cd)"),
+        ("dragon_slayer",  1200,  {"atk": 15},                      "lifesteal",   "Lifesteal 30% for 5 ticks (45 tick cd)"),
     ],
     "helm": [
-        ("cloth_cap",       150,  {"hp_max": 10}),
-        ("iron_helm",       400,  {"hp_max": 25}),
-        ("dragon_helm",     900,  {"hp_max": 60}),
+        ("cloth_cap",       150,  {"hp_max": 10},                   None, None),
+        ("iron_helm",       400,  {"hp_max": 25},                   "guard",       "Shield 80 dmg for 6 ticks (40 tick cd)"),
+        ("dragon_helm",     900,  {"hp_max": 60},                   "undying",     "Auto-revive once with 50% HP (one-time)"),
     ],
     "chest": [
-        ("leather_vest",    150,  {"hp_max": 15}),
-        ("iron_plate",      450,  {"hp_max": 40}),
-        ("dragon_scale",    1000, {"hp_max": 80}),
-],
+        ("leather_vest",    150,  {"hp_max": 15},                   None, None),
+        ("iron_plate",      450,  {"hp_max": 40},                   "thorns",      "Reflect 30% dmg for 8 ticks (35 tick cd)"),
+        ("dragon_scale",   1000,  {"hp_max": 80},                   "immortal",    "First lethal hit deals 1 (one-time)"),
+    ],
     "boots": [
-        ("cloth_boots",     100,  {"speed": 1}),   # speed not modeled; +atk as proxy
-        ("swift_boots",     300,  {"speed": 2, "atk": 2}),
-        ("dragon_talons",   700,  {"speed": 3, "atk": 4}),
+        ("cloth_boots",     100,  {"atk": 4},                       None, None),
+        ("swift_boots",     300,  {"atk": 2, "hp_max": 5},          "haste",       "+50% move speed for 10 ticks (25 tick cd)"),
+        ("dragon_talons",   700,  {"atk": 4, "hp_max": 10},         "phase",       "Teleport 10 cells toward enemy (60 tick cd)"),
     ],
     "trinket": [
-        ("lucky_charm",     200,  {"atk": 2, "hp_max": 10}),
-        ("hero_medal",      500,  {"atk": 5, "hp_max": 20}),
-        ("dragon_eye",      1100, {"atk": 10, "hp_max": 50}),
+        ("lucky_charm",     200,  {"atk": 2, "hp_max": 10},         None, None),
+        ("hero_medal",      500,  {"atk": 5, "hp_max": 20},         None, None),
+        ("dragon_eye",     1100,  {"atk": 10, "hp_max": 50},        "time_warp",   "Slow enemies 50% within 8 cells 5 ticks (50 tick cd)"),
     ],
     "skin": [
-        ("basic_skin",      0,    {}),  # free / cosmetic only
-        ("fancy_skin",      250,  {"atk": 1}),
-        ("legendary_skin",  800,  {"atk": 3, "hp_max": 15}),
+        ("basic_skin",        0,  {},                                None, None),
+        ("war_paint",        200,  {"atk": 4, "hp_max": 20},         "berserk",     "+30% atk for 6 ticks (40 tick cd)"),
+        ("ascended_form",    600,  {"atk": 18, "hp_max": 80},        "rebirth",     "30% chance to survive death at 1 HP (one-time)"),
     ],
 }
 
@@ -246,6 +253,7 @@ class ArenaMatch:
     team_dmg_to_crystal: dict = field(default_factory=lambda: {"blue": 0, "red": 0})
     # Neutral objectives
     dragons: list = field(default_factory=list)   # active dragons in the arena
+    events: list = field(default_factory=list)     # random events (ambush / airdrop / etc.)
     team_buffs: dict = field(default_factory=dict)  # {"blue"/"red": {"dmg_pct": 0.2, "expires_at": tick}}
     # 3-lane towers (6 towers total: 3 lanes × 2 kinds × 2 teams)
     towers: list = field(default_factory=list)    # list[Tower]
@@ -318,8 +326,10 @@ def _recompute_agent_stats(a: ArenaAgent) -> None:
     for slot, item_id in (a.equipment or {}).items():
         if not item_id:
             continue
-        for item_name, _cost, stats in EQUIPMENT_CATALOG.get(slot, []):
+        for entry in EQUIPMENT_CATALOG.get(slot, []):
+            item_name = entry[0]
             if item_name == item_id:
+                stats = entry[2]
                 bonus_atk += stats.get("atk", 0)
                 bonus_hp += stats.get("hp_max", 0)
                 break
@@ -342,9 +352,11 @@ def _try_buy_best_affordable(a: ArenaAgent, m: ArenaMatch) -> bool:
         catalog = EQUIPMENT_CATALOG.get(slot, [])
         # Pick the most expensive item the agent can afford
         best = None
-        for item_name, cost, stats in catalog:
+        for entry in catalog:
+            item_name = entry[0]
+            cost = entry[1]
             if a.gold >= cost and (best is None or cost > best[1]):
-                best = (item_name, cost, stats)
+                best = (item_name, cost)
         if best is None:
             continue
         a.equipment[slot] = best[0]
@@ -689,6 +701,9 @@ def form_match_from_draft(draft_id: str, lookup_agent) -> ArenaMatch | None:
     blue = [lookup(p, "blue") for p in blue_pids]
     red = [lookup(p, "red") for p in red_pids]
 
+    # Load bot strategy profiles from DB (if any)
+    _load_strategy_profiles(blue + red)
+
     # Auto-assign lanes by roster index: 0→top, 1→mid, 2→bot, 3→top, 4→mid
     for i, a in enumerate(blue):
         a.lane = LANES[i % 3]
@@ -797,6 +812,290 @@ def _draft_tick_loop(draft_id: str) -> None:
 
 
 
+
+
+def _update_fitness(m: ArenaMatch, blue_pids: list, red_pids: list) -> None:
+    """After a match, update each bot's fitness score and adjust strategy
+    thresholds slightly toward "what worked".
+
+    Fitness formula (per bot):
+      win:    +1.0  + min(kills, 5) * 0.1  - deaths * 0.1
+      loss:   -0.5  + kills * 0.1  - deaths * 0.05
+      draw:   0  + (kills - deaths) * 0.1
+
+    Strategy adjustment (small nudge, only for bots with ≥3 matches):
+      if won: keep thresholds
+      if lost: hp_retreat_threshold += 0.03 (more cautious)
+                ult_teamfight_min_enemies += 1 (wait for more)
+      clamp to [0.10, 0.60] for hp, [1, 8] for ult threshold
+    """
+    import sqlite3, json as _json
+    try:
+        c = sqlite3.connect(str(DB_PATH))
+        cur = c.cursor()
+        all_pids = list(blue_pids) + list(red_pids)
+        for pid in all_pids:
+            # Compute this bot's contribution
+            agent = next((x for x in (m.blue + m.red) if x.pid == pid), None)
+            if agent is None:
+                continue
+            won = (pid in (blue_pids if m.winner == "blue" else red_pids))
+            kills, deaths = agent.kills, agent.deaths
+            if won:
+                fitness = 1.0 + min(kills, 5) * 0.1 - deaths * 0.1
+            else:
+                fitness = -0.5 + kills * 0.1 - deaths * 0.05
+            # Read current row (or insert defaults)
+            row = cur.execute(
+                "SELECT wins, losses, matches_played, fitness_history, "
+                "hp_retreat_threshold, ult_teamfight_min_enemies "
+                "FROM bot_strategy_profiles WHERE pid=?", (pid,)
+            ).fetchone()
+            if row is None:
+                cur.execute("""INSERT INTO bot_strategy_profiles
+                               (pid, wins, losses, matches_played, fitness_history, last_updated)
+                               VALUES (?, ?, ?, ?, ?, ?)""",
+                            (pid,
+                             1 if won else 0,
+                             0 if won else 1,
+                             1,
+                             _json.dumps([fitness]),
+                             time.time()))
+            else:
+                wins, losses, matches, hist_json, hp_thr, ult_min_en = row
+                wins = wins + (1 if won else 0)
+                losses = losses + (0 if won else 1)
+                matches += 1
+                hist = _json.loads(hist_json)
+                hist.append(fitness)
+                hist = hist[-30:]  # keep last 30
+                # Strategy nudge after 3 matches
+                if matches >= 3 and not won:
+                    hp_thr = min(0.60, hp_thr + 0.03)
+                    ult_min_en = min(8, ult_min_en + 1)
+                cur.execute("""UPDATE bot_strategy_profiles SET
+                               wins=?, losses=?, matches_played=?,
+                               fitness_history=?,
+                               hp_retreat_threshold=?,
+                               ult_teamfight_min_enemies=?,
+                               last_updated=? WHERE pid=?""",
+                            (wins, losses, matches, _json.dumps(hist),
+                             hp_thr, ult_min_en, time.time(), pid))
+        c.commit()
+        c.close()
+    except Exception as e:
+        print(f"[fitness update] failed: {e}")
+
+
+
+
+
+# Item active skill effects (each item's active is identified by name)
+ITEM_ACTIVE_DESCRIPTIONS = {}
+for _slot, _items in EQUIPMENT_CATALOG.items():
+    for _entry in _items:
+        _name, _cost, _stats, _active_id, _active_desc = _entry
+        if _active_id:
+            ITEM_ACTIVE_DESCRIPTIONS[_active_id] = (_name, _active_desc)
+
+
+def _agent_item_active(a: ArenaAgent) -> tuple:
+    """Return (active_skill_id, item_name) if agent has an item with active."""
+    for slot, item_id in a.equipment.items():
+        if not item_id:
+            continue
+        for entry in EQUIPMENT_CATALOG.get(slot, []):
+            name = entry[0]
+            if name == item_id:
+                active_id = entry[3]
+                if active_id:
+                    return (active_id, name)
+    return (None, None)
+
+
+def _tick_item_actives(m: ArenaMatch, tick_n: int) -> None:
+    """Each tick, bots with item-actives may auto-trigger them based on
+    simple conditions (low HP → undying/immortal, in teamfight → berserk,
+    near enemies → blade_burst).
+    """
+    for a in m.blue + m.red:
+        if not a.alive:
+            continue
+        active_id, item_name = _agent_item_active(a)
+        # Ensure dicts exist on the agent (instance attrs)
+        if not hasattr(a, "item_active_cd"):
+            a.item_active_cd = {}
+        if not hasattr(a, "active_buffs"):
+            a.active_buffs = {}
+        if not active_id or a.item_active_cd.get(active_id, 0) > 0:
+            continue
+        # Conditions per active skill
+        state = _team_fight_state(a, m)
+        trigger = False
+        if active_id == "berserk" and state["near_enemies"] >= 1:
+            trigger = True
+        elif active_id == "blade_burst" and state["near_enemies"] >= 1:
+            trigger = True
+        elif active_id == "guard" and state["my_hp_pct"] < 0.40:
+            trigger = True
+        elif active_id == "haste" and state["near_enemies"] >= 2:
+            trigger = True
+        elif active_id == "phase" and state["near_enemies"] >= 1:
+            trigger = True
+        elif active_id == "thorns" and state["near_enemies"] >= 2:
+            trigger = True
+        elif active_id == "time_warp" and state["near_enemies"] >= 2:
+            trigger = True
+        elif active_id == "lifesteal" and state["my_hp_pct"] < 0.70:
+            trigger = True
+        if trigger:
+            a.active_buffs[active_id] = tick_n + _item_active_duration(active_id)
+            a.item_active_cd[active_id] = _item_active_cd_value(active_id)
+            m.append_log(
+                f"✨ {a.name} ({a.team}) 装备 [{item_name}] 触发 {active_id} ({ITEM_ACTIVE_DESCRIPTIONS[active_id][1]}) | "
+                f"✨ {a.name} ({a.team}) item [{item_name}] triggers {active_id}",
+                f"✨ {a.name} ({a.team}) item [{item_name}] triggers {active_id}",
+            )
+
+
+def _item_active_duration(active_id: str) -> int:
+    return {
+        "berserk": 6, "blade_burst": 1, "guard": 6, "haste": 10,
+        "phase": 1, "thorns": 8, "time_warp": 5, "lifesteal": 5,
+    }.get(active_id, 5)
+
+
+def _item_active_cd_value(active_id: str) -> int:
+    return {
+        "berserk": 40, "blade_burst": 30, "guard": 40, "haste": 25,
+        "phase": 60, "thorns": 35, "time_warp": 50, "lifesteal": 45,
+    }.get(active_id, 30)
+
+
+def _tick_item_cooldowns(m: ArenaMatch) -> None:
+    """Decrement all item-active cooldowns each tick."""
+    for a in m.blue + m.red:
+        for active_id in list(a.item_active_cd.keys()):
+            if a.item_active_cd[active_id] > 0:
+                a.item_active_cd[active_id] -= 1
+                if a.item_active_cd[active_id] <= 0:
+                    del a.item_active_cd[active_id]
+
+
+
+
+
+def _load_strategy_profiles(agents: list) -> None:
+    """For each agent, load the bot_strategy_profiles row (if exists) and
+    populate the agent's strategy fields (as instance attrs).
+    Players without a profile keep defaults.
+    """
+    import sqlite3
+    try:
+        c = sqlite3.connect(str(DB_PATH))
+        cur = c.cursor()
+        for a in agents:
+            row = cur.execute(
+                "SELECT hp_retreat_threshold, teamfight_radius, teamfight_min_allies, "
+                "teamfight_min_enemies, ult_teamfight_min_allies, ult_teamfight_min_enemies, "
+                "ult_threshold FROM bot_strategy_profiles WHERE pid=?", (a.pid,)
+            ).fetchone()
+            if row is not None:
+                (a.hp_retreat_threshold, a.teamfight_radius, a.teamfight_min_allies,
+                 a.teamfight_min_enemies, a.ult_teamfight_min_allies,
+                 a.ult_teamfight_min_enemies, a.ult_threshold) = row
+        c.close()
+    except Exception as e:
+        print(f"[strategy profile] load failed: {e}")
+
+
+
+
+
+# Random event types — added to the field at random intervals
+EVENT_TYPES = [
+    ("ambush",     "伏击",  "Ambush!",       5,   100,   {"hp": 50},      "A wild enemy scout appears in the jungle!"),
+    ("airdrop",    "空投",  "Airdrop",       15,  300,   {"gold": 200},   "A supply crate falls — +200 gold for whoever reaches it first!"),
+    ("wild_buff",  "野区符", "Wild Buff",    10,  60,    {"dmg_pct": 0.10, "duration": 30}, "A jungle spirit blesses the first player who finds it (+10% dmg 30 ticks)"),
+    ("trap",       "陷阱",  "Trap",          8,   80,    {"dmg": 60},     "Hidden spike trap! Deals 60 dmg to the first player to step on it."),
+    ("merchant",   "商人",  "Merchant",      12,  150,   {"random_item": "shadow_fang"}, "A wandering merchant appears — sells shadow_fang for 150g"),
+]
+
+
+def _spawn_random_event(m: ArenaMatch, tick_n: int) -> None:
+    """Every 15 ticks (after tick 10), 30% chance of a random event."""
+    if tick_n < 10 or tick_n % 15 != 0:
+        return
+    import random as _r
+    rng = _r.Random(tick_n + hash(m.match_id) % 1000)
+    if rng.random() > 0.30:
+        return
+    kind, name_zh, name_en, pos_x_off, value, payload, desc = rng.choice(EVENT_TYPES)
+    x = ARENA_W // 2 + rng.randint(-10, 10)
+    y = rng.randint(5, ARENA_H - 5)
+    pos = [x, y]
+    m.events.append({
+        "kind": kind, "name_zh": name_zh, "name_en": name_en,
+        "pos": pos, "value": value, "payload": payload, "desc": desc,
+        "spawn_tick": tick_n, "claimed_by": None, "claimed_tick": None,
+    })
+    m.append_log(
+        f"🎲 随机事件 [{name_zh}] 在 ({x},{y}) 出现! {desc} | 🎲 Random event [{name_en}] at ({x},{y})!",
+        f"🎲 Random event [{name_en}] at ({x},{y})!",
+    )
+
+
+def _process_event_claims(m: ArenaMatch, tick_n: int) -> None:
+    """Agents within 2 cells of an event claim it."""
+    for ev in m.events:
+        if ev["claimed_by"]:
+            continue
+        candidates = [a for a in (m.blue + m.red) if a.alive]
+        for a in candidates:
+            if abs(a.pos[0] - ev["pos"][0]) + abs(a.pos[1] - ev["pos"][1]) > 2:
+                continue
+            ev["claimed_by"] = a.pid
+            ev["claimed_tick"] = tick_n
+            kind = ev["kind"]
+            if kind == "ambush":
+                a.hp = max(1, a.hp - 50)
+                m.append_log(
+                    f"⚔️ {a.name} ({a.team}) 遭遇伏击 -50 HP | ⚔️ {a.name} ({a.team}) ambushed -50 HP",
+                    f"⚔️ {a.name} ({a.team}) ambushed -50 HP",
+                )
+            elif kind == "airdrop":
+                a.gold += 200
+                _try_buy_best_affordable(a, m)
+                m.append_log(
+                    f"📦 {a.name} ({a.team}) 拾取空投 +200g (gold={a.gold}) | 📦 {a.name} ({a.team}) airdrop +200g (gold={a.gold})",
+                    f"📦 {a.name} ({a.team}) airdrop +200g (gold={a.gold})",
+                )
+            elif kind == "wild_buff":
+                if not m.team_buffs.get(a.team) or m.team_buffs[a.team]["expires_at"] < tick_n + 30:
+                    m.team_buffs[a.team] = {"dmg_pct": 0.10, "expires_at": tick_n + 30, "source": "wild_buff"}
+                    m.append_log(
+                        f"✨ {a.name} ({a.team}) 拾取野区符 全队 +10% 伤害 30 tick | ✨ {a.name} ({a.team}) wild buff team +10% dmg 30 ticks",
+                        f"✨ {a.name} ({a.team}) wild buff team +10% dmg 30 ticks",
+                    )
+            elif kind == "trap":
+                a.hp = max(1, a.hp - 60)
+                m.append_log(
+                    f"💥 {a.name} ({a.team}) 踩到陷阱 -60 HP | 💥 {a.name} ({a.team}) trap -60 HP",
+                    f"💥 {a.name} ({a.team}) trap -60 HP",
+                )
+            elif kind == "merchant":
+                if a.gold >= 150:
+                    a.gold -= 150
+                    a.equipment["weapon"] = "shadow_fang"
+                    _recompute_agent_stats(a)
+                    m.append_log(
+                        f"🛒 {a.name} ({a.team}) 购买 [shadow_fang] (-150g) | 🛒 {a.name} ({a.team}) bought [shadow_fang] (-150g)",
+                        f"🛒 {a.name} ({a.team}) bought [shadow_fang] (-150g)",
+                    )
+            break
+
+
+
 def _save_replay(m: ArenaMatch) -> None:
     """Persist the entire match history to data/replays/<match_id>.json.
 
@@ -855,6 +1154,11 @@ def _match_tick_loop(match_id: str) -> None:
                 apply_match_result(blue_pids, red_pids, m.winner or "blue")
             except Exception as ex:
                 print(f"[rank] failed to apply: {ex}")
+            # Update bot fitness + nudge strategy
+            try:
+                _update_fitness(m, blue_pids, red_pids)
+            except Exception as ex:
+                print(f"[fitness] failed to apply: {ex}")
             # Save replay to disk
             try:
                 _save_replay(m)
@@ -903,11 +1207,16 @@ def tick_match(m: ArenaMatch, rng: random.Random | None = None) -> None:
         tick_n = m.tick
 
     _spawn_dragons(m, tick_n)
+    _spawn_random_event(m, tick_n)
     _patrol_dragons(m)
     _respawn_step(m, tick_n)
+    _periodic_shop_step(m, tick_n)
     _expire_buffs(m, tick_n)
     _tick_spell_effects(m, tick_n)
+    _tick_item_actives(m, tick_n)
+    _tick_item_cooldowns(m)
     _tick_ultimates(m, tick_n)
+    _process_event_claims(m, tick_n)
     _combat_step(m, rng, tick_n)
     _push_towers_step(m, tick_n)
     _check_crystals(m, tick_n)
@@ -985,6 +1294,23 @@ def _apply_buff(m: ArenaMatch, team: str, dragon_kind: str, tick_n: int) -> None
             "expires_at": tick_n + reward["duration"],
             "source": dragon_kind,
         }
+
+
+
+
+def _periodic_shop_step(m: ArenaMatch, tick_n: int) -> None:
+    """Every 10 ticks, each alive agent tries to buy the best affordable item.
+    This ensures bots gear up even if they haven't killed anything yet.
+    """
+    if tick_n % 10 != 0:
+        return
+    for a in m.blue + m.red:
+        if not a.alive:
+            continue
+        if a.gold < 100:
+            continue
+        _try_buy_best_affordable(a, m)
+
 
 
 def _respawn_step(m: ArenaMatch, tick_n: int) -> None:
@@ -1079,37 +1405,37 @@ def _should_use_spell_now(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> bool:
 
 
 def _should_use_ult_now(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> bool:
-    """Strict ult timing: only fire during team fights (≥2 ally + ≥2 enemy)."""
+    """Strict ult timing: only fire during team fights (per-agent threshold)."""
     if a.ult_cd > 0 or not a.ultimate or not a.alive:
         return False
     state = _team_fight_state(a, m)
-    # Was: any time. Now: only team-fight moments.
-    return state["near_allies"] >= 1 and state["near_enemies"] >= 1
+    min_a = getattr(a, "ult_teamfight_min_allies", 1)
+    min_e = getattr(a, "ult_teamfight_min_enemies", 1)
+    return (state["near_allies"] >= min_a
+            and state["near_enemies"] >= min_e)
 
 
 def _bot_think(a: ArenaAgent, m: ArenaMatch) -> dict:
-    """The 5-rule decision tree.
+    """The 5-rule decision tree (per-agent thresholds via a.*_threshold fields).
 
     Returns {"decision": str, "target": Agent|None, "reason": str}.
-    Decisions:
-      retreat  — back to friendly crystal pos
-      fight    — engage nearest enemy (current behavior)
-      teamfight— push forward when allies outnumber
-      contest  — go for nearby dragon
-      push     — push nearest enemy tower when outer is down
-      default  — approach nearest enemy (lowest priority)
     """
     state = _team_fight_state(a, m)
 
-    # Rule 1: RETREAT — low HP
-    if state["my_hp_pct"] < 0.30:
+    # Rule 1: RETREAT — low HP (per-agent threshold; default 0.30)
+    hp_thr = getattr(a, "hp_retreat_threshold", 0.30)
+    if state["my_hp_pct"] < hp_thr:
         return {"decision": "retreat", "target": None,
-                "reason": f"HP {state['my_hp_pct']*100:.0f}% < 30% — retreat"}
+                "reason": f"HP {state['my_hp_pct']*100:.0f}% < {hp_thr*100:.0f}% — retreat"}
 
-    # Rule 2: TEAMFIGHT — both teams have ≥2 within 5 cells
-    if state["near_allies"] >= 1 and state["near_enemies"] >= 1:
+    # Rule 2: TEAMFIGHT — both teams within teamfight_radius
+    tf_radius = getattr(a, "teamfight_radius", 5)
+    tf_min_a = getattr(a, "teamfight_min_allies", 1)
+    tf_min_e = getattr(a, "teamfight_min_enemies", 1)
+    if (state["near_allies"] >= tf_min_a
+            and state["near_enemies"] >= tf_min_e):
         return {"decision": "teamfight", "target": None,
-                "reason": f"teamfight ({state['near_allies']}+{state['near_enemies']} within 5)"}
+                "reason": f"teamfight ({state['near_allies']}+{state['near_enemies']} within {tf_radius})"}
 
     # Rule 3: CONTEST — dragon is near and no big enemy force
     if state["dragon_near"] and state["near_enemies"] < 2:
