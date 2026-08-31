@@ -209,6 +209,24 @@ CREATE TABLE IF NOT EXISTS match_room_players (
     FOREIGN KEY (pid) REFERENCES players(id)
 );
 
+
+CREATE TABLE IF NOT EXISTS bot_strategy_profiles (
+    pid                       TEXT PRIMARY KEY,
+    hp_retreat_threshold      REAL DEFAULT 0.30,  -- retreat if HP below this
+    teamfight_radius          INTEGER DEFAULT 5,  -- cells within which allies+enemies trigger teamfight
+    teamfight_min_allies      INTEGER DEFAULT 1,  -- min allies within radius for teamfight
+    teamfight_min_enemies     INTEGER DEFAULT 1,  -- min enemies within radius for teamfight
+    ult_teamfight_min_allies  INTEGER DEFAULT 1,  -- min allies for ult team-fight condition
+    ult_teamfight_min_enemies INTEGER DEFAULT 1,  -- min enemies for ult team-fight condition
+    ult_threshold             REAL DEFAULT 1.00,  -- 1.0 = always when teamfight; <1.0 = more selective
+    wins                      INTEGER DEFAULT 0,
+    losses                    INTEGER DEFAULT 0,
+    matches_played            INTEGER DEFAULT 0,
+    fitness_history           TEXT DEFAULT '[]',  -- JSON array of fitness scores
+    last_updated              REAL NOT NULL,
+    FOREIGN KEY (pid) REFERENCES players(id)
+);
+
 """
 
 
