@@ -227,6 +227,36 @@ CREATE TABLE IF NOT EXISTS bot_strategy_profiles (
     FOREIGN KEY (pid) REFERENCES players(id)
 );
 
+
+CREATE TABLE IF NOT EXISTS tournaments (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    mode            TEXT NOT NULL DEFAULT '5v5',   -- game mode (1v1/3v3/5v5)
+    size            INTEGER NOT NULL,            -- 4 / 8 / 16
+    status          TEXT NOT NULL DEFAULT 'registration', -- registration | in_progress | done | cancelled
+    creator_pid     TEXT NOT NULL,
+    bracket         TEXT DEFAULT '{}',          -- JSON: {round0: [(t1, t2, ...)], round1: [...], ...}
+    matches         TEXT DEFAULT '{}',          -- JSON: {slot_id: match_id}
+    winner_team     TEXT,                       -- 'blue' | 'red' | NULL
+    created_at      REAL NOT NULL,
+    started_at      REAL,
+    ended_at        REAL,
+    FOREIGN KEY (creator_pid) REFERENCES players(id)
+);
+
+CREATE TABLE IF NOT EXISTS tournament_teams (
+    tournament_id   TEXT NOT NULL,
+    team_id         INTEGER NOT NULL,           -- 0..size-1
+    team_name       TEXT,
+    captain_pid     TEXT NOT NULL,             -- one player representing the team
+    players         TEXT DEFAULT '[]',         -- JSON list of player pids on the team
+    seed            INTEGER DEFAULT 0,
+    eliminated      INTEGER DEFAULT 0,          -- boolean
+    FOREIGN KEY (tournament_id) REFERENCES tournaments(id),
+    FOREIGN KEY (captain_pid) REFERENCES players(id),
+    PRIMARY KEY (tournament_id, team_id)
+);
+
 """
 
 
