@@ -1147,6 +1147,274 @@ def _tick_item_actives_for_one(a, m, tick_n):
 
 
 
+
+
+def _advance_tournament_bracket(match_id: str, winner: str) -> None:
+    """If match_id is part of a tournament, advance the bracket.
+
+    For MVP: tracks winners in the bracket. Actual next-round match
+    creation requires player pids (we don't currently store them in
+    tournaments.matches), so we defer that to a future trigger.
+    """
+    import json as _json
+    try:
+        from server.db import connect as _db
+        c = _db()
+        cur = c.cursor()
+        cur.execute("SELECT id, bracket, status FROM tournaments WHERE matches LIKE ?",
+                    (f'%"{match_id}"%',))
+        t = cur.fetchone()
+        if t is None:
+            return
+        tid = t["id"]
+        bracket = _json.loads(t["bracket"])
+        matches = _json.loads(t["matches"])
+        # Find slot
+        slot = None
+        for k, v in matches.items():
+            if v == match_id:
+                slot = k
+                break
+        if slot is None or "_m" not in slot:
+            return
+        round_n = int(slot.split("_")[0][1:])
+        round_key = f"round{round_n}"
+        if round_key not in bracket:
+            return
+        for m in bracket[round_key]:
+            if m["slot"] == slot:
+                m["winner"] = winner
+                break
+        cur.execute("UPDATE tournaments SET bracket=? WHERE id=?",
+                    (_json.dumps(bracket), tid))
+        c.commit()
+        # Check if all matches in this round have a winner
+        all_done = all(m.get("winner") for m in bracket[round_key])
+        if all_done and round_n > 0:
+            print(f"[tournament {tid}] round {round_n} complete; awaiting admin trigger for next round")
+    except Exception as ex:
+        print(f"[tournament advance] failed: {ex}")
+
+
+def _spawn_tournament_next_round(tournament_id: str) -> dict:
+    """Admin endpoint helper: create next-round matches for a tournament.
+
+    Looks at the bracket to find the next round to play (one where all
+    prev-round winners are known). For each pair of winners, creates a
+    fresh match (5v5/3v3/1v1) using the captain_pid from each team.
+    Returns the new matches dict.
+    """
+    import json as _json, secrets as _sec, threading as _th
+    from server import arena as _arena_mod
+    from server import arena_draft as _draft_mod
+    from server.db import connect as _db
+    with _db_lock:
+        c = _db()
+        cur = c.cursor()
+        cur.execute("SELECT bracket, matches, mode, size FROM tournaments WHERE id=?",
+                    (tournament_id,))
+        t = cur.fetchone()
+        if t is None:
+            return {"ok": False, "error": "tournament not found"}
+        bracket = _json.loads(t["bracket"])
+        mode = t["mode"]
+        size = t["size"]
+        # Find next round to play
+        cur_round = 0
+        for k in bracket.keys():
+            rn = int(k.replace("round", ""))
+            cur_round = max(cur_round, rn)
+        cur_round += 1  # next round to create
+        next_round_key = f"round{cur_round}"
+        if cur_round * 2 > size:
+            # Tournament is done
+            cur.execute("UPDATE tournaments SET status='done', ended_at=? WHERE id=?",
+                        (time.time(), tournament_id))
+            c.commit()
+            return {"ok": True, "status": "done"}
+        # Find winners from previous round
+        prev_key = f"round{cur_round - 1}"
+        if prev_key not in bracket:
+            return {"ok": False, "error": "no prev round data"}
+        prev_matches = bracket[prev_key]
+        if not all(m.get("winner") for m in prev_matches):
+            return {"ok": False, "error": "previous round not finished"}
+        # For each pair of winners, create match using team_teams captain_pid
+        mode_size = (1 if mode == "1v1" else (3 if mode == "3v3" else 5))
+        new_matches = _json.loads(t["matches"])
+        new_bracket_round = []
+        for i in range(0, len(prev_matches), 2):
+            w1 = prev_matches[i]["winner"]
+            w2 = prev_matches[i + 1]["winner"]
+            # Find team_id by winner_team in tournament_teams
+            cur.execute("""SELECT team_id, captain_pid, players FROM tournament_teams
+                           WHERE tournament_id=? AND team_name=? LIMIT 1""",
+                        (tournament_id, w1))
+            t1 = cur.fetchone()
+            cur.execute("""SELECT team_id, captain_pid, players FROM tournament_teams
+                           WHERE tournament_id=? AND team_name=? LIMIT 1""",
+                        (tournament_id, w2))
+            t2 = cur.fetchone()
+            if t1 is None or t2 is None:
+                continue
+            p1 = _json.loads(t1["players"]) or [t1["captain_pid"]]
+            p2 = _json.loads(t2["players"]) or [t2["captain_pid"]]
+            while len(p1) < mode_size:
+                import secrets as _sec2
+                p1.append("bot_" + _sec2.token_hex(2))
+            while len(p2) < mode_size:
+                p2.append("bot_" + _sec2.token_hex(2))
+            new_slot = f"r{cur_round}_m{i//2}"
+            mid = "mtch_" + _sec.token_hex(4)
+            new_matches[new_slot] = mid
+            new_bracket_round.append({"slot": new_slot, "match_id": mid,
+                                      "team1": w1, "team2": w2})
+            draft = _draft_mod.create_draft(p1[:mode_size], p2[:mode_size], mode=mode)
+            t1_th = _th.Thread(target=_arena_mod._draft_tick_loop, args=(draft.draft_id,),
+                               daemon=True, name=f"tdraft-{draft.draft_id}")
+            t1_th.start()
+        if next_round_key not in bracket:
+            bracket[next_round_key] = []
+        bracket[next_round_key] = new_bracket_round
+        cur.execute("UPDATE tournaments SET bracket=?, matches=? WHERE id=?",
+                    (_json.dumps(bracket), _json.dumps(new_matches), tournament_id))
+        c.commit()
+    return {"ok": True, "round": cur_round, "matches_created": len(new_bracket_round)}
+
+
+
+
+
+# Set bonuses — when N+ items in a tier pattern are owned
+SET_BONUSES = {
+    # 3 件 dragon tier (helm/chest/boots) → 套装
+    "dragon_armor": {
+        "slots": [("helm", "dragon_helm"), ("chest", "dragon_scale"), ("boots", "dragon_talons")],
+        "required": 3,
+        "bonus": {"hp_max": 80, "atk": 10},
+        "desc_zh": "龙鳞套装 3 件: 全属性 +hp80 +atk10",
+        "desc_en": "Dragon set (3 pieces): +80 HP, +10 atk",
+    },
+    "fire_master": {
+        "slots": [("weapon", "flame_blade"), ("chest", "iron_plate")],
+        "required": 2,
+        "bonus": {"atk_pct": 0.10},
+        "desc_zh": "火焰大师 2 件: +10% 攻击",
+        "desc_en": "Fire Master (2 pieces): +10% atk",
+    },
+    "lucky_striker": {
+        "slots": [("weapon", "shadow_fang"), ("trinket", "dragon_eye")],
+        "required": 2,
+        "bonus": {"crit_pct": 0.10},  # extra 10% crit chance
+        "desc_zh": "幸运打击 2 件: +10% 暴击",
+        "desc_en": "Lucky Striker (2 pieces): +10% crit",
+    },
+}
+
+
+def _compute_set_bonuses(a: ArenaAgent) -> tuple:
+    """Check what set bonuses the agent qualifies for.
+
+    Returns (set_name or None, bonus_dict, desc_text).
+    """
+    qualified = []
+    for set_name, defn in SET_BONUSES.items():
+        owned = sum(
+            1 for slot, item in defn["slots"]
+            if a.equipment.get(slot) == item
+        )
+        if owned >= defn["required"]:
+            qualified.append((set_name, defn))
+    if not qualified:
+        return (None, {}, "")
+    set_name, defn = qualified[0]
+    desc = defn.get(f"desc_{('zh' if a.team else 'en')}", defn.get("desc_en", ""))
+    return (set_name, defn["bonus"], desc)
+
+
+def _apply_set_bonus_stats(bonus: dict, a: ArenaAgent) -> None:
+    """Apply a set bonus to an agent's effective stats (called from _recompute_agent_stats)."""
+    if bonus.get("hp_max"):
+        a.hp_max += bonus["hp_max"]
+        a.hp = max(1, int(a.hp_max * (a.hp / max(1, a.hp_max)) ))
+    if bonus.get("atk"):
+        a.atk += bonus["atk"]
+    # Note: atk_pct / crit_pct are queried at combat time, not precomputed.
+
+
+# Summoner + Ult combo bonuses — triggers when player has specific combo
+SPELL_ULT_COMBOS = {
+    # heal + priest_resurrect: emergency self-heal at death
+    ("heal", "priest_resurrect"): {
+        "bonus_zh": "神圣医疗: 死亡时自动 heal 30% HP (一次性)",
+        "bonus_en": "Divine Heal: on death auto-restore 30% HP (one-time)",
+        "trigger": "on_death_low_hp",
+        "effect": {"auto_heal_pct": 0.30},
+    },
+    # flash + warrior_charge: double-tap blink + charge
+    ("flash", "warrior_charge"): {
+        "bonus_zh": "冲锋闪现: 冲锋距离 +50%, 命中伤害 +20%",
+        "bonus_en": "Charge Flash: charge range +50%, dmg +20%",
+        "trigger": "on_ult",
+        "effect": {"charge_range_mult": 1.5, "ult_dmg_mult": 1.2},
+    },
+    # ignite + mage_meteor: meteor applies ignite stacks on all
+    ("ignite", "mage_meteor"): {
+        "bonus_zh": "燃烧陨石: meteor 范围 +3 cells, 每个敌人附加 5 tick ignite",
+        "bonus_en": "Burning Meteor: +3 cell radius, each enemy gets 5-tick ignite",
+        "trigger": "on_ult",
+        "effect": {"radius_bonus": 3, "apply_ignite": 5},
+    },
+    # exhaust + hunter_snipe: snipe applies exhaust
+    ("exhaust", "hunter_snipe"): {
+        "bonus_zh": "虚弱狙击: 命中目标 atk -50% 持续 10 tick",
+        "bonus_en": "Exhausting Snipe: target atk -50% for 10 ticks",
+        "trigger": "on_ult",
+        "effect": {"apply_exhaust_ticks": 10},
+    },
+    # ghost + warrior_charge: charge gets +movement speed during travel
+    ("ghost", "warrior_charge"): {
+        "bonus_zh": "幽灵冲锋: 冲锋过程不可阻挡 + 不触发敌方警觉",
+        "bonus_en": "Ghost Charge: unstoppable, no enemy aggro during charge",
+        "trigger": "on_ult",
+        "effect": {"unstoppable": True},
+    },
+}
+
+
+def _get_combo_for_agent(a: ArenaAgent) -> dict | None:
+    """Return the combo bonus dict for this agent's (spell, ult), or None."""
+    if not a.spell or not a.ultimate:
+        return None
+    key = (a.spell, a.ultimate)
+    return SPELL_ULT_COMBOS.get(key)
+
+
+def _check_set_bonus_event(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> None:
+    """When an agent's equipment changes (e.g. bought new item), log
+    when they newly qualify for a set bonus.
+    """
+    prev = getattr(a, "_last_set", None)
+    set_name, bonus, desc = _compute_set_bonuses(a)
+    cur = set_name if set_name else None
+    if cur != prev and cur is not None:
+        m.append_log(
+            f"🎁 {a.name} ({a.team}) 触发套装 [{cur}] {desc} | 🎁 {a.name} ({a.team}) triggers set [{cur}] {desc}",
+            f"🎁 {a.name} ({a.team}) triggers set [{cur}] {desc}",
+        )
+    a._last_set = cur
+
+
+
+
+
+def _check_set_bonuses(m: ArenaMatch, tick_n: int) -> None:
+    """Periodically check if agents newly qualify for set bonuses."""
+    for a in m.blue + m.red:
+        _check_set_bonus_event(a, m, tick_n)
+
+
+
 def _save_replay(m: ArenaMatch) -> None:
     """Persist the entire match history to data/replays/<match_id>.json.
 
@@ -1262,6 +1530,7 @@ def tick_match(m: ArenaMatch, rng: random.Random | None = None) -> None:
     _patrol_dragons(m)
     _respawn_step(m, tick_n)
     _periodic_shop_step(m, tick_n)
+    _check_set_bonuses(m, tick_n)
     _expire_buffs(m, tick_n)
     _tick_spell_effects(m, tick_n)
     _tick_item_actives(m, tick_n)
