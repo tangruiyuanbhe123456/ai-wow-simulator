@@ -565,8 +565,13 @@ def _tick_spell_effects(m: ArenaMatch, tick_n: int) -> None:
         if a.ignite_ticks > 0:
             target = next((e for e in (m.blue + m.red) if e.pid == a.ignite_target_pid), None)
             if target and target.alive:
-                target.hp = max(0, target.hp - 16)  # 80 / 5 = 16/tick
+                dmg = 16  # 80 / 5 = 16/tick
+                target.hp = max(0, target.hp - dmg)
                 a.ignite_ticks -= 1
+                m.append_log(
+                    f"🔥 {target.name} 燃烧 -16 HP (剩 {a.ignite_ticks} tick) | 🔥 {target.name} burning -16 HP ({a.ignite_ticks} ticks left)",
+                    f"🔥 {target.name} burning -16 HP ({a.ignite_ticks} ticks left)",
+                )
                 if target.hp == 0:
                     target.alive = False
                     target.deaths += 1
@@ -575,8 +580,17 @@ def _tick_spell_effects(m: ArenaMatch, tick_n: int) -> None:
                     m.team_kills[a.team] += 1
                     a.gold += GOLD_PER_KILL
                     _try_buy_best_affordable(a, m)
+                    m.append_log(
+                        f"💀 {a.name} ({a.team}) 点燃处决 {target.name} | 💀 {a.name} ({a.team}) ignite executes {target.name}",
+                        f"💀 {a.name} ({a.team}) ignite executes {target.name}",
+                    )
             else:
                 a.ignite_ticks = 0
+        # Smite should already kill on cast; nothing to tick here
+        if a.weakened_ticks > 0:
+            a.weakened_ticks -= 1
+        if a.speed_boost_ticks > 0:
+            a.speed_boost_ticks -= 1
         if a.weakened_ticks > 0:
             a.weakened_ticks -= 1
         if a.speed_boost_ticks > 0:
@@ -592,10 +606,13 @@ def _spell_atk_modifier(a: ArenaAgent) -> float:
     return 1.0
 
 
-def _shield_absorb(a: ArenaAgent, incoming: int) -> int:
+def _shield_absorb(a, incoming: int) -> int:
     """Apply barrier shield to incoming damage; return the actual dmg taken."""
-    if a.shield_remaining > 0 and incoming > 0:
-        absorbed = min(a.shield_remaining, incoming)
+    if a is None:
+        return incoming
+    sr = getattr(a, "shield_remaining", 0)
+    if sr and sr > 0 and incoming > 0:
+        absorbed = min(sr, incoming)
         a.shield_remaining -= absorbed
         return incoming - absorbed
     return incoming
@@ -1093,6 +1110,40 @@ def _process_event_claims(m: ArenaMatch, tick_n: int) -> None:
                         f"🛒 {a.name} ({a.team}) bought [shadow_fang] (-150g)",
                     )
             break
+
+
+
+
+
+def _tick_item_actives_for_one(a, m, tick_n):
+    """Single-agent version of _tick_item_actives (for human action)."""
+    if not a.alive:
+        return
+    active_id, item_name = _agent_item_active(a)
+    if not hasattr(a, "item_active_cd"):
+        a.item_active_cd = {}
+    if not active_id or a.item_active_cd.get(active_id, 0) > 0:
+        return
+    state = _team_fight_state(a, m)
+    trigger = False
+    if active_id in ("berserk", "blade_burst") and state["near_enemies"] >= 1:
+        trigger = True
+    elif active_id == "guard" and state["my_hp_pct"] < 0.40:
+        trigger = True
+    elif active_id in ("haste", "thorns", "time_warp") and state["near_enemies"] >= 2:
+        trigger = True
+    elif active_id == "phase" and state["near_enemies"] >= 1:
+        trigger = True
+    elif active_id == "lifesteal" and state["my_hp_pct"] < 0.70:
+        trigger = True
+    if trigger:
+        a.active_buffs = getattr(a, "active_buffs", {})
+        a.active_buffs[active_id] = tick_n + _item_active_duration(active_id)
+        a.item_active_cd[active_id] = _item_active_cd_value(active_id)
+        m.append_log(
+            f"✨ {a.name} ({a.team}) 装备 [{item_name}] 触发 {active_id} (人工) | ✨ {a.name} ({a.team}) item [{item_name}] triggers {active_id} (manual)",
+            f"✨ {a.name} ({a.team}) item [{item_name}] triggers {active_id} (manual)",
+        )
 
 
 
