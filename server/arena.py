@@ -606,10 +606,13 @@ def _spell_atk_modifier(a: ArenaAgent) -> float:
     return 1.0
 
 
-def _shield_absorb(a: ArenaAgent, incoming: int) -> int:
+def _shield_absorb(a, incoming: int) -> int:
     """Apply barrier shield to incoming damage; return the actual dmg taken."""
-    if a.shield_remaining > 0 and incoming > 0:
-        absorbed = min(a.shield_remaining, incoming)
+    if a is None:
+        return incoming
+    sr = getattr(a, "shield_remaining", 0)
+    if sr and sr > 0 and incoming > 0:
+        absorbed = min(sr, incoming)
         a.shield_remaining -= absorbed
         return incoming - absorbed
     return incoming
