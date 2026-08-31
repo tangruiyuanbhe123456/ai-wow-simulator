@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>装备交易 / Equipment Trade (v8)</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.t-container { max-width: 1300px; margin: 0 auto; }
+.t-grid { display: grid; grid-template-columns: 380px 1fr; gap: 16px; }
+.create-panel { padding: 12px; background: #1a2030; border: 1px solid #5fb3d4; }
+.create-panel h2 { color: #5fb3d4; margin-bottom: 8px; }
+.create-panel input, .create-panel select {
+  background: #050810; color: #ffcc00; border: 1px solid #5fb3d4;
+  padding: 6px 10px; font-family: inherit; font-size: 13px; width: 100%;
+  margin-bottom: 8px; box-sizing: border-box;
+}
+.create-panel button {
+  background: #ffcc00; color: #0a0e14; border: none; padding: 8px 16px;
+  font-weight: bold; cursor: pointer; width: 100%;
+}
+.inv-list { padding: 12px; background: #1a2030; border: 1px solid #ffcc00; }
+.inv-list h3 { color: #ffcc00; margin-bottom: 6px; font-size: 14px; }
+.inv-slot { display: grid; grid-template-columns: 60px 1fr 60px; gap: 6px;
+  padding: 4px 6px; border-bottom: 1px dotted #333; align-items: center; font-size: 13px; }
+.inv-slot.filled { background: rgba(255,204,0,0.05); }
+.inv-slot button { background: #5fb3d4; color: #0a0e14; border: none; padding: 2px 6px;
+  cursor: pointer; font-size: 11px; font-weight: bold; }
+.offers-list { padding: 12px; background: #0a0e14; }
+.offers-list h2 { color: #ffcc00; margin-bottom: 8px; }
+.offer-card {
+  border: 1px solid #333; padding: 8px; margin-bottom: 6px;
+  background: #050810; display: grid;
+  grid-template-columns: 1fr 100px 80px 80px;
+  gap: 6px; align-items: center;
+}
+.offer-card.pending { border-left: 4px solid #ffcc00; }
+.offer-card.accepted { border-left: 4px solid #88ff88; opacity: 0.6; }
+.offer-card.cancelled { border-left: 4px solid #ff5f5f; opacity: 0.4; }
+.offer-card .from { color: #5fb3d4; font-size: 12px; }
+.offer-card .items { color: #ffd700; font-size: 11px; }
+.offer-card button { background: #5fb3d4; color: #0a0e14; border: none;
+  padding: 4px 8px; cursor: pointer; font-weight: bold; font-size: 12px; }
+.offer-card button.cancel { background: #ff5f5f; color: white; }
+.history-list { padding: 12px; background: #0a0e14; margin-top: 16px; }
+.history-list h2 { color: #88ff88; margin-bottom: 8px; }
+.hist-row { display: grid; grid-template-columns: 100px 1fr 100px 80px;
+  gap: 6px; padding: 4px 6px; border-bottom: 1px dotted #333; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="t-container">
+<header>
+  <h1>装备交易 <span class="en">| Equipment Trade (v8)</span></h1>
+  <div id="controls">
+    <a href="/" style="color:#5fb3d4">← Main</a>
+    <a href="/lobby.html" style="color:#5fafff">/lobby</a>
+    <a href="/training.html" style="color:#5fafff">/training</a>
+    <span id="status">loading...</span>
+  </div>
+</header>
+
+<div class="t-grid">
+  <div>
+    <div class="create-panel">
+      <h2>创建交易 / Create Offer</h2>
+      <label>Token (your auth):</label>
+      <input id="my_token" type="text" placeholder="bearer token (required)">
+      <label>Your PID:</label>
+      <input id="my_pid" type="text" placeholder="your player pid (required)">
+      <label>Recipient PID:</label>
+      <input id="to_pid" type="text" placeholder="recipient pid">
+      <label>Gold to offer (0 = none):</label>
+      <input id="gold_amount" type="number" value="0" min="0" max="10000">
+      <h3 style="color:#ffcc00;font-size:13px;margin:8px 0 4px">Select items to offer:</h3>
+      <div class="inv-list">
+        <div id="my-inventory">loading...</div>
+      </div>
+      <button onclick="createOffer()">Send Offer 发送</button>
+    </div>
+  </div>
+
+  <div>
+    <div class="offers-list">
+      <h2>我的交易 / My pending offers</h2>
+      <div id="my-offers">loading...</div>
+    </div>
+    <div class="history-list">
+      <h2>交易历史 / Trade History</h2>
+      <div id="history">loading...</div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let myInventory = {};
+let selectedItems = {};
+
+function setStatus(m) { $('status').textContent = m; }
+
+// Auto-fill from URL params
+(function init() {
+  const u = new URLSearchParams(location.search);
+  if (u.get('pid')) $('my_pid').value = u.get('pid');
+  if (u.get('token')) $('my_token').value = u.get('token');
+})();
+
+async function call(path, method='GET', token=null, body=null, params=null) {
+  if (params) {
+    const qs = new URLSearchParams(params).toString();
+    path += (path.includes('?') ? '&' : '?') + qs;
+  }
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  return await r.json();
+}
+
+async function loadInventory() {
+  const token = $('my_token').value.trim();
+  const pid = $('my_pid').value.trim();
+  if (!token || !pid) {
+    $('my-inventory').innerHTML = '<div style="color:#888">enter token + pid to see inventory</div>';
+    return;
+  }
+  // Use the leaderboard endpoint to find the player and assume empty inventory initially.
+  // We don't have a direct endpoint, so we just show common slots.
+  const slots = ['weapon', 'helm', 'chest', 'boots', 'trinket', 'skin'];
+  let html = '';
+  for (const slot of slots) {
+    html += `<div class="inv-slot">
+      <span style="color:#888">${slot}</span>
+      <span style="color:#ffcc00">${myInventory[slot] || '(empty)'}</span>
+      <button onclick="toggleItem('${slot}', '${myInventory[slot] || ""}')" ${!myInventory[slot] ? 'disabled' : ''}>${myInventory[slot] ? 'Select' : '—'}</button>
+    </div>`;
+  }
+  $('my-inventory').innerHTML = html;
+}
+
+function toggleItem(slot, item) {
+  if (selectedItems[slot]) {
+    delete selectedItems[slot];
+  } else if (item) {
+    selectedItems[slot] = item;
+  }
+  loadInventory();
+  // Visual update
+  Object.keys(selectedItems).forEach(s => {
+    const el = document.querySelector(`.inv-slot:has-text("${s}")`);
+  });
+}
+
+async function createOffer() {
+  const token = $('my_token').value.trim();
+  const to_pid = $('to_pid').value.trim();
+  const gold = parseInt($('gold_amount').value || '0', 10);
+  if (!token || !to_pid) { setStatus('need token + to_pid'); return; }
+  const r = await call('/api/v1/trade/offer', 'POST', token, null,
+    { to_pid, gold: String(gold), items: JSON.stringify(selectedItems) });
+  if (r.ok) { setStatus('✓ offer ' + r.offer_id + ' created'); selectedItems = {}; loadInventory(); fetchList(); }
+  else setStatus('✗ ' + (r.detail || 'create failed'));
+}
+
+async function fetchList() {
+  const token = $('my_token').value.trim();
+  const pid = $('my_pid').value.trim();
+  if (!token) { $('my-offers').innerHTML = '<div style="color:#888">enter token</div>'; return; }
+  const lr = await call('/api/v1/trade/list', 'GET', token);
+  if (!lr.ok) return;
+  // Separate incoming/outgoing
+  const incoming = (lr.offers || []).filter(o => o.to_pid === pid);
+  const outgoing = (lr.offers || []).filter(o => o.from_pid === pid);
+  let html = '';
+  if (incoming.length === 0 && outgoing.length === 0) {
+    html = '<div style="color:#888">no pending offers</div>';
+  }
+  incoming.forEach(o => {
+    const itemsTxt = Object.keys(o.items || {}).length
+      ? Object.entries(o.items).map(([s, i]) => `${s}:${i}`).join(', ')
+      : '(no items)';
+    html += `<div class="offer-card pending">
+      <div><div class="from">incoming from ${o.from_pid.slice(-8)}</div>
+      <div style="color:#888;font-size:11px">${itemsTxt}</div></div>
+      <div class="items">${o.gold}g</div>
+      <div>${o.status}</div>
+      <button onclick="acceptOffer('${o.offer_id}')">Accept</button>
+    </div>`;
+  });
+  outgoing.forEach(o => {
+    const itemsTxt = Object.keys(o.items || {}).length
+      ? Object.entries(o.items).map(([s, i]) => `${s}:${i}`).join(', ')
+      : '(no items)';
+    html += `<div class="offer-card pending">
+      <div><div class="from">to ${o.to_pid.slice(-8)}</div>
+      <div style="color:#888;font-size:11px">${itemsTxt}</div></div>
+      <div class="items">${o.gold}g</div>
+      <div>${o.status}</div>
+      <button class="cancel" onclick="cancelOffer('${o.offer_id}')">cancel</button>
+    </div>`;
+  });
+  $('my-offers').innerHTML = html;
+
+  // History
+  const hr = await call('/api/v1/trade/history', 'GET', token);
+  if (hr.ok) {
+    let hhtml = '';
+    if ((hr.history || []).length === 0) {
+      hhtml = '<div style="color:#888">no completed trades yet</div>';
+    }
+    (hr.history || []).slice(0, 20).forEach(h => {
+      const dir = h.from_pid === pid ? 'sent to' : 'received from';
+      const other = h.from_pid === pid ? h.to_pid : h.from_pid;
+      const itemsTxt = Object.keys(h.items || {}).length
+        ? Object.entries(h.items).map(([s, i]) => `${s}:${i}`).join(', ')
+        : '(no items)';
+      hhtml += `<div class="hist-row">
+        <span style="color:#888">${new Date(h.completed_at * 1000).toLocaleTimeString()}</span>
+        <span>${dir} <b>${other.slice(-8)}</b>: ${itemsTxt}</span>
+        <span style="color:#ffd700">${h.gold}g</span>
+        <span style="color:#88ff88">✓ done</span>
+      </div>`;
+    });
+    $('history').innerHTML = hhtml;
+  }
+}
+
+async function acceptOffer(oid) {
+  const token = $('my_token').value.trim();
+  const r = await call('/api/v1/trade/accept', 'POST', token, null, { offer_id: oid });
+  if (r.ok) { setStatus('✓ accepted'); fetchList(); }
+  else setStatus('✗ ' + (r.detail || 'accept failed'));
+}
+
+async function cancelOffer(oid) {
+  const token = $('my_token').value.trim();
+  const r = await call('/api/v1/trade/cancel', 'POST', token, null, { offer_id: oid });
+  if (r.ok) { setStatus('✓ cancelled'); fetchList(); }
+  else setStatus('✗ ' + (r.detail || 'cancel failed'));
+}
+
+setInterval(fetchList, 3000);
+fetchList();
+setInterval(loadInventory, 1000);
+loadInventory();
+</script>
+</body>
+</html>
