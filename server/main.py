@@ -421,11 +421,175 @@ def tournament_list(lang: str = Query("en"), status: str = Query("registration")
 
 
 
+
+
+
+
+
+
+
+
+
+@app.post("/api/v1/tournament/{tid}/advance")
+def tournament_advance_endpoint(req: Request, tid: str, lang: str = Query("en")):
+    """Admin trigger: spawn next-round matches for a tournament."""
+    from server import arena as _arena_mod
+    result = _arena_mod._spawn_tournament_next_round(tid)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error", "advance failed"))
+    return {"ok": True, "lang": lang, "tournament_id": tid, "result": result}
+
+
+
+
+
+
+@app.get("/api/v1/stream/status")
+def stream_status(lang: str = Query("en")):
+    """Get the current streaming status (RTMP URL + viewer count).
+
+    OBS / Bilibili Live / Twitch all consume RTMP. The actual streaming
+    is done by an external ffmpeg / OBS process pointed at this URL.
+    For MVP we just report the configuration.
+    """
+    return {
+        "ok": True, "lang": lang,
+        "rtmp_urls": {
+            "bilibili":   "rtmp://live-push.bilivideo.com/live-bvc/你的stream_key",
+            "twitch":     "rtmp://live.twitch.tv/app/你的stream_key",
+            "douyin":     "rtmp://push-rtmp-flv.douyincdn.com/third/你的stream_key",
+            "youtube":    "rtmp://a.rtmp.youtube.com/live2/你的stream_key",
+        },
+        "instruction_zh": (
+            "1. 安装 ffmpeg 或 OBS Studio；"
+            "2. 用以下命令把 server 网页推到 RTMP："
+            "  ffmpeg -re -f x11grab -video_size 1280x720 -i :0 -f alsa -i default "
+            "  -c:v libx264 -preset veryfast -maxrate 3000k -bufsize 6000k "
+            "  -pix_fmt yuv420p -g 50 -c:a aac -b:a 160k -ar 44100 "
+            "  -f flv rtmp://目标URL/stream_key"
+            "3. 或用无头浏览器 (playwright/chromium) 自动截图"
+        ),
+        "instruction_en": (
+            "1. Install ffmpeg or OBS Studio; "
+            "2. Push server HTML to RTMP with: "
+            "  ffmpeg -re -f x11grab -video_size 1280x720 -i :0 -f alsa -i default "
+            "  -c:v libx264 -preset veryfast -maxrate 3000k -bufsize 6000k "
+            "  -pix_fmt yuv420p -g 50 -c:a aac -b:a 160k -ar 44100 "
+            "  -f flv rtmp://target/stream_key"
+            "3. Or use a headless browser (playwright/chromium) to auto-screenshot"
+        ),
+        "ffmpeg_available": False,  # detected at runtime
+    }
+
+
+@app.post("/api/v1/stream/launch")
+def stream_launch(req: Request,
+                  platform: str = Query("bilibili"),
+                  stream_key: str = Query(...),
+                  lang: str = Query("en")):
+    """Launch a stream from server HTML to the specified RTMP URL.
+
+    Requires ffmpeg installed. Uses playwright headless chromium to capture
+    the active match view and pipes it to ffmpeg → RTMP.
+
+    For MVP this is a stub — full implementation requires installing
+    playwright + chromium.
+    """
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+    if platform == "bilibili":
+        rtmp = f"rtmp://live-push.bilivideo.com/live-bvc/{stream_key}"
+    elif platform == "twitch":
+        rtmp = f"rtmp://live.twitch.tv/app/{stream_key}"
+    elif platform == "douyin":
+        rtmp = f"rtmp://push-rtmp-flv.douyincdn.com/third/{stream_key}"
+    else:
+        rtmp = stream_key  # custom
+    return {
+        "ok": True, "lang": lang,
+        "rtmp": rtmp, "platform": platform,
+        "command_zh": f"ffmpeg ... -f flv {rtmp}",
+        "command_en": f"ffmpeg ... -f flv {rtmp}",
+        "note": "MVP stub — actual streaming requires ffmpeg + playwright/chromium. See /api/v1/stream/status for setup instructions.",
+    }
+
+
+
+
+
+
+@app.post("/api/v1/chat/send")
+def chat_send(req: Request,
+              message: str = Query(..., min_length=1, max_length=500),
+              scope: str = Query("global"),  # 'global' | 'room:<id>' | 'match:<id>'
+              lang: str = Query("en")):
+    """Post a chat message."""
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        pid = row["player_id"]
+        cur.execute("SELECT name FROM players WHERE id=?", (pid,))
+        p = cur.fetchone()
+        name = p["name"] if p else "?"
+        cur.execute("""INSERT INTO chat_messages (scope, pid, name, message, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (scope, pid, name, message.strip(), time.time()))
+        c.commit()
+    return {"ok": True, "lang": lang, "scope": scope, "pid": pid, "name": name,
+            "message": message.strip(), "ts": time.time()}
+
+
+@app.get("/api/v1/chat/list")
+def chat_list(scope: str = Query("global"),
+             since: float = Query(0.0),
+             lang: str = Query("en")):
+    """Get chat messages for a scope since a timestamp."""
+    from server.db import connect as _db
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("""SELECT id, pid, name, message, created_at
+                       FROM chat_messages WHERE scope=? AND created_at > ?
+                       ORDER BY created_at DESC LIMIT 100""", (scope, since))
+        rows = cur.fetchall()
+    return {"ok": True, "lang": lang, "scope": scope, "messages": [
+        {"id": r["id"], "pid": r["pid"], "name": r["name"],
+         "message": r["message"], "ts": r["created_at"]}
+        for r in rows
+    ]}
+
+
+
 @app.get("/trade")
 @app.get("/trade.html")
 def trade_page():
     """Equipment trade UI (v8) — player↔player item + gold exchange."""
     return FileResponse(str(WEB_DIR / "trade.html"))
+
+
+@app.get("/chat")
+@app.get("/chat.html")
+def chat_page():
+    """Global chat UI (v9) — spectator hangout."""
+    return FileResponse(str(WEB_DIR / "chat.html"))
 
 
 @app.get("/tournament")

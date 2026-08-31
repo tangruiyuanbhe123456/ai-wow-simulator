@@ -257,6 +257,17 @@ CREATE TABLE IF NOT EXISTS tournament_teams (
     PRIMARY KEY (tournament_id, team_id)
 );
 
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope       TEXT NOT NULL,         -- 'global' | 'room:<room_id>' | 'match:<match_id>'
+    pid         TEXT NOT NULL,         -- sender pid
+    name        TEXT NOT NULL,         -- sender display name (cached)
+    message     TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    FOREIGN KEY (pid) REFERENCES players(id)
+);
+
 """
 
 

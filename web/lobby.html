@@ -120,6 +120,17 @@
   <div id="my-rooms">loading...</div>
 </div>
 
+
+<div class="chat-panel">
+  <h2 style="color:#ffcc00">💬 聊天 / Chat (lobby scope)</h2>
+  <div id="chat-messages" style="background:#0a0e14;padding:8px;height:200px;overflow-y:auto;font-size:13px;border:1px solid #333"></div>
+  <div style="margin-top:6px;display:flex;gap:6px">
+    <input id="chat-input" type="text" placeholder="type message..." style="flex:1;background:#050810;color:#ffcc00;border:1px solid #5fb3d4;padding:6px;font-family:inherit">
+    <button onclick="sendChat()" style="background:#ffcc00;color:#0a0e14;border:none;padding:6px 12px;cursor:pointer;font-weight:bold">发送 Send</button>
+  </div>
+  <div style="font-size:11px;color:#888;margin-top:4px">需要填 token 才能发。Need token to send. <a href="/chat.html">/chat.html</a> 独立页</div>
+</div>
+
 <footer>
   <p style="text-align:center;color:#666;font-size:11px;margin-top:24px">
     v5: 比赛室模式 (1v1/3v3/5v5) + 多 match 并行 / match_room schema + 满员自动 draft
@@ -279,6 +290,40 @@ setInterval(fetchList, 3000);
 setInterval(fetchMyRooms, 5000);
 fetchList();
 fetchMyRooms();
+
+let lastChatTs = 0;
+async function sendChat() {
+  if (!myToken) { alert('需要先填 token'); return; }
+  const msg = document.getElementById('chat-input').value.trim();
+  if (!msg) return;
+  await fetch('/api/v1/chat/send?message=' + encodeURIComponent(msg) + '&scope=global', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + myToken }
+  });
+  document.getElementById('chat-input').value = '';
+  fetchChat();
+}
+async function fetchChat() {
+  try {
+    const r = await fetch('/api/v1/chat/list?scope=global&since=' + lastChatTs);
+    const d = await r.json();
+    if (!d.ok) return;
+    const box = document.getElementById('chat-messages');
+    d.messages.reverse().forEach(m => {
+      const ts = new Date(m.ts * 1000).toLocaleTimeString();
+      const div = document.createElement('div');
+      div.innerHTML = '<span style="color:#5fafff">[' + ts + ']</span> <b style="color:#ffcc00">' +
+        escapeHtml(m.name) + '</b>: ' + escapeHtml(m.message);
+      box.appendChild(div);
+      lastChatTs = Math.max(lastChatTs, m.ts);
+    });
+    box.scrollTop = box.scrollHeight;
+  } catch (e) {}
+}
+function escapeHtml(s) { return String(s || '').replace(/[<>&"']/g, c => ({'<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;'}[c])); }
+setInterval(fetchChat, 2000);
+fetchChat();
+
 </script>
 </body>
 </html>
