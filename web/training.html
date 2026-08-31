@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>AI 训练中心 / Bot Training Center (v7)</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.tc-container { max-width: 1300px; margin: 0 auto; }
+.tc-header { padding: 12px; background: #1a2030; border: 1px solid #ffcc00; margin-bottom: 12px; }
+.tc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.bot-card { padding: 10px; border: 1px solid #333; background: #050810; margin-bottom: 8px; }
+.bot-card.strong { border-left: 4px solid #88ff88; }
+.bot-card.weak   { border-left: 4px solid #ff5f5f; }
+.bot-card.neutral{ border-left: 4px solid #ffcc00; }
+.bot-card h3 { color: #5fafff; font-size: 14px; }
+.bot-stats { display: grid; grid-template-columns: 80px 80px 80px 80px; gap: 6px; margin-top: 6px; font-size: 12px; }
+.bot-stat { background: #0a0e14; padding: 4px 6px; border: 1px solid #333; }
+.bot-stat .lbl { color: #888; font-size: 10px; }
+.bot-stat .val { color: #ffcc00; font-weight: bold; }
+.fitness-chart { background: #0a0e14; padding: 4px; font-family: monospace; font-size: 10px; color: #88ff88; min-height: 40px; max-height: 60px; overflow-x: auto; white-space: nowrap; }
+.detail-panel { padding: 12px; background: #1a2030; border: 1px solid #5fb3d4; }
+.detail-panel h2 { color: #5fb3d4; margin-bottom: 8px; }
+table.t { border-collapse: collapse; width: 100%; font-size: 12px; }
+table.t th { text-align: left; background: #0a0e14; padding: 4px 8px; color: #888; }
+table.t td { padding: 4px 8px; border-bottom: 1px dotted #333; }
+table.t td.lbl { color: #888; }
+table.t td.val { color: #ffcc00; }
+.controls input { background: #050810; color: #ffcc00; border: 1px solid #5fb3d4; padding: 4px 8px; width: 200px; font-family: inherit; }
+.controls button { background: #5fb3d4; color: #0a0e14; border: none; padding: 4px 12px; cursor: pointer; font-weight: bold; }
+.empty { color: #888; padding: 40px; text-align: center; }
+.legend { font-size: 11px; color: #888; margin-top: 8px; }
+.bar { display: inline-block; background: #88ff88; height: 8px; vertical-align: middle; }
+.bar.neg { background: #ff5f5f; }
+</style>
+</head>
+<body>
+<div class="tc-container">
+<header>
+  <h1>AI 训练中心 <span class="en">| Bot Training Center (v7)</span></h1>
+  <div id="controls">
+    <a href="/" style="color:#5fb3d4">← Main</a>
+    <a href="/lobby.html" style="color:#5fafff">/lobby</a>
+    <a href="/leaderboard.html" style="color:#5fafff">/leaderboard</a>
+    <a href="/replay.html" style="color:#5fafff">/replay</a>
+    <span id="status">loading...</span>
+  </div>
+</header>
+
+<div class="tc-header">
+  <h2 style="color:#ffcc00">🧠 策略学习 / Strategy Learning</h2>
+  <p style="font-size:13px">
+    每场比赛后，每个 bot 的 fitness（基于胜负 + kills/deaths）会被计算。
+    输 ≥3 场的 bot 会自动调整策略：HP 撤退线 +0.03（更谨慎），
+    终极技需更多敌人在场（更克制）。
+  </p>
+  <p class="legend">
+    图表: 绿色 = 正 fitness（赢），红色 = 负 fitness（输）。每个 bot 显示最近 30 场比赛。
+  </p>
+</div>
+
+<div class="tc-grid">
+  <div>
+    <h2 style="color:#5fb3d4">Bot 排行 / Bot Leaderboard <span style="font-size:11px;color:#888">(top by wins)</span></h2>
+    <div class="controls">
+      <input id="filter" type="text" placeholder="filter by pid (last chars)...">
+      <button onclick="applyFilter()">Filter</button>
+    </div>
+    <div id="bot-list">loading...</div>
+  </div>
+
+  <div class="detail-panel">
+    <h2>Bot 详情 / Detail</h2>
+    <div id="detail">
+      <div class="empty">Click a bot on the left to see its full training history.</div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let allBots = [];
+let currentDetailPid = null;
+
+function setStatus(m) { $('status').textContent = m; }
+function scoreClass(w, l) {
+  if (w > l) return 'strong';
+  if (w < l) return 'weak';
+  return 'neutral';
+}
+function renderChart(hist) {
+  if (!hist || hist.length === 0) return '<div style="color:#888">no data</div>';
+  let html = '';
+  for (const f of hist) {
+    const color = f > 0 ? '#88ff88' : (f < 0 ? '#ff5f5f' : '#888');
+    const len = Math.abs(f) * 20;
+    html += `<span style="display:inline-block;width:${len}px;background:${color};height:14px;margin-right:1px" title="${f.toFixed(2)}"></span>`;
+  }
+  return `<div class="fitness-chart">${html}</div>`;
+}
+
+async function fetchList() {
+  try {
+    const r = await fetch('/api/v1/training/stats?limit=50');
+    const d = await r.json();
+    if (!d.ok) { setStatus('ERR ' + (d.detail || 'load failed')); return; }
+    allBots = d.bots || [];
+    setStatus('OK ' + new Date().toLocaleTimeString() + ' (' + allBots.length + ' bots)');
+    renderList(allBots);
+  } catch (e) { setStatus('ERR ' + e.message); }
+}
+
+function renderList(bots) {
+  if (bots.length === 0) {
+    $('bot-list').innerHTML = '<div class="empty">no bots trained yet. Run 5v5 demo to populate.</div>';
+    return;
+  }
+  let html = '';
+  bots.forEach(b => {
+    const cls = scoreClass(b.wins, b.losses);
+    html += `<div class="bot-card ${cls}" onclick="loadDetail('${b.pid}')" style="cursor:pointer">
+      <h3>${escapeHtml(b.pid.slice(-12))} <span style="color:#888;font-size:10px;font-weight:normal">${b.pid}</span></h3>
+      <div class="bot-stats">
+        <div class="bot-stat"><div class="lbl">Wins</div><div class="val">${b.wins}</div></div>
+        <div class="bot-stat"><div class="lbl">Losses</div><div class="val">${b.losses}</div></div>
+        <div class="bot-stat"><div class="lbl">Matches</div><div class="val">${b.matches}</div></div>
+        <div class="bot-stat"><div class="lbl">Avg fit</div><div class="val">${b.avg_fitness}</div></div>
+      </div>
+      <div style="font-size:10px;color:#888;margin-top:4px">
+        hp_retreat=${(b.hp_retreat_threshold*100).toFixed(0)}% ·
+        ult_min_en=${b.ult_teamfight_min_enemies} ·
+        last_fit=${b.last_fitness}
+      </div>
+    </div>`;
+  });
+  $('bot-list').innerHTML = html;
+}
+
+async function loadDetail(pid) {
+  currentDetailPid = pid;
+  try {
+    const r = await fetch('/api/v1/training/bot/' + encodeURIComponent(pid));
+    if (r.status === 404) {
+      $('detail').innerHTML = '<div class="empty">bot has no training profile (did not play yet)</div>';
+      return;
+    }
+    const d = await r.json();
+    if (!d.ok) return;
+    const p = d.profile;
+    $('detail').innerHTML = `<h2 style="color:#5fb3d4">${escapeHtml(p.pid)}</h2>
+      <table class="t">
+        <tr><th colspan="2">Strategy Thresholds (learned)</th></tr>
+        <tr><td class="lbl">hp_retreat_threshold</td><td class="val">${p.hp_retreat_threshold}</td></tr>
+        <tr><td class="lbl">teamfight_radius</td><td class="val">${p.teamfight_radius}</td></tr>
+        <tr><td class="lbl">teamfight_min_allies</td><td class="val">${p.teamfight_min_allies}</td></tr>
+        <tr><td class="lbl">teamfight_min_enemies</td><td class="val">${p.teamfight_min_enemies}</td></tr>
+        <tr><td class="lbl">ult_teamfight_min_allies</td><td class="val">${p.ult_teamfight_min_allies}</td></tr>
+        <tr><td class="lbl">ult_teamfight_min_enemies</td><td class="val">${p.ult_teamfight_min_enemies}</td></tr>
+        <tr><td class="lbl">ult_threshold</td><td class="val">${p.ult_threshold}</td></tr>
+        <tr><th colspan="2">Record</th></tr>
+        <tr><td class="lbl">Wins</td><td class="val">${p.wins}</td></tr>
+        <tr><td class="lbl">Losses</td><td class="val">${p.losses}</td></tr>
+        <tr><td class="lbl">Matches played</td><td class="val">${p.matches_played}</td></tr>
+        <tr><th colspan="2">Fitness chart (last ${p.fitness_history.length} matches)</th></tr>
+        <tr><td colspan="2">${renderChart(p.fitness_history)}</td></tr>
+      </table>
+      <div style="margin-top:8px">
+        <button onclick="resetBot('${pid}')" style="background:#ff5f5f;color:white;border:none;padding:4px 12px;cursor:pointer">Reset profile</button>
+      </div>`;
+  } catch (e) { $('detail').innerHTML = 'ERR ' + e.message; }
+}
+
+async function resetBot(pid) {
+  if (!confirm('Reset training profile for ' + pid + '?')) return;
+  const r = await fetch('/api/v1/training/reset/' + encodeURIComponent(pid), { method: 'POST' });
+  const d = await r.json();
+  if (d.ok) { fetchList(); $('detail').innerHTML = '<div class="empty">profile reset</div>'; }
+}
+
+function applyFilter() {
+  const q = $('filter').value.trim().toLowerCase();
+  if (!q) { renderList(allBots); return; }
+  renderList(allBots.filter(b => b.pid.toLowerCase().includes(q)));
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[<>&"']/g, c => ({'<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+
+fetchList();
+setInterval(fetchList, 5000);
+</script>
+</body>
+</html>
