@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>赛事系统 / Tournament Bracket (v8)</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.tn-container { max-width: 1300px; margin: 0 auto; }
+.tn-header { padding: 12px; background: #1a2030; border: 1px solid #ffcc00; margin-bottom: 12px; }
+.tn-grid { display: grid; grid-template-columns: 360px 1fr; gap: 16px; }
+.create-panel { padding: 12px; background: #1a2030; border: 1px solid #5fb3d4; }
+.create-panel h2 { color: #5fb3d4; margin-bottom: 8px; }
+.create-panel input, .create-panel select {
+  background: #050810; color: #ffcc00; border: 1px solid #5fb3d4;
+  padding: 6px 10px; font-family: inherit; font-size: 13px; width: 100%;
+  margin-bottom: 8px; box-sizing: border-box;
+}
+.create-panel button {
+  background: #ffcc00; color: #0a0e14; border: none; padding: 8px 16px;
+  font-weight: bold; cursor: pointer; width: 100%;
+  margin-bottom: 6px;
+}
+.create-panel button.start { background: #88ff88; }
+.bracket-view { padding: 12px; background: #0a0e14; }
+.bracket-view h2 { color: #ffcc00; margin-bottom: 8px; }
+.bracket-round { margin-bottom: 12px; padding: 8px; border: 1px solid #333; }
+.round-title { color: #5fafff; font-size: 14px; margin-bottom: 6px; }
+.match-card {
+  display: grid; grid-template-columns: 1fr 40px 1fr;
+  gap: 6px; padding: 6px 8px; border: 1px solid #444;
+  background: #050810; margin-bottom: 4px; align-items: center;
+  font-size: 12px;
+}
+.match-card .team-name { color: #ffcc00; }
+.match-card .winner { color: #88ff88; font-weight: bold; }
+.match-card .vs { color: #888; font-size: 10px; text-align: center; }
+.match-card .match-id { color: #5fafff; font-size: 10px; text-align: center; }
+.tn-list { margin-top: 16px; padding: 12px; background: #0a0e14; border: 1px solid #5fb3d4; }
+.tn-list h3 { color: #5fb3d4; margin-bottom: 6px; }
+.tn-list-item {
+  padding: 6px 8px; border-bottom: 1px dotted #333;
+  display: flex; justify-content: space-between; cursor: pointer;
+}
+.tn-list-item:hover { background: #1a2030; }
+</style>
+</head>
+<body>
+<div class="tn-container">
+<header>
+  <h1>赛事系统 <span class="en">| Tournament Bracket (v8)</span></h1>
+  <div id="controls">
+    <a href="/" style="color:#5fb3d4">← Main</a>
+    <a href="/lobby.html" style="color:#5fafff">/lobby</a>
+    <a href="/training.html" style="color:#5fafff">/training</a>
+    <a href="/trade.html" style="color:#5fafff">/trade</a>
+    <span id="status">loading...</span>
+  </div>
+</header>
+
+<div class="tn-header">
+  <h2 style="color:#ffcc00">🏆 单败赛 / Single Elimination</h2>
+  <p style="font-size:13px">
+    创建 tournament (2/4/8/16 队) → 注册 teams → start → 系统自动生成 bracket + 第一轮 5v5 matches.
+    后续 rounds 还在 MVP 阶段 (需要 admin 后台).
+  </p>
+</div>
+
+<div class="tn-grid">
+  <div class="create-panel">
+    <h2>创建 / Create</h2>
+    <label>Token (your auth):</label>
+    <input id="my_token" type="text" placeholder="bearer token (required)">
+    <label>Tournament name:</label>
+    <input id="tn_name" type="text" placeholder="My tournament">
+    <label>Size (teams):</label>
+    <select id="tn_size">
+      <option value="2">2 (final only)</option>
+      <option value="4" selected>4 (semis + final)</option>
+      <option value="8">8 (quarters + semis + final)</option>
+    </select>
+    <label>Mode:</label>
+    <select id="tn_mode">
+      <option value="1v1">1v1</option>
+      <option value="3v3">3v3</option>
+      <option value="5v5" selected>5v5</option>
+    </select>
+    <button onclick="createTournament()">Create 创建</button>
+    <p style="font-size:11px;color:#888;margin-top:6px">
+      After creating, share the tournament_id so other players can register.
+    </p>
+
+    <div id="current-tn" style="margin-top:16px;padding:8px;background:#0a0e14;border:1px solid #ffcc00;display:none">
+      <h3 style="color:#ffcc00;font-size:14px">Current tournament</h3>
+      <div id="ct-detail"></div>
+      <button onclick="registerTeamPrompt()" style="margin-top:8px;background:#5fb3d4;color:#0a0e14;border:none;padding:6px 12px;cursor:pointer;font-weight:bold">
+        + Register my team 注册我的队
+      </button>
+      <button onclick="startTournament()" class="start" style="background:#88ff88;color:#0a0e14;border:none;padding:6px 12px;cursor:pointer;font-weight:bold;margin-top:4px">
+        ▶ Start tournament 开始 (only creator)
+      </button>
+    </div>
+  </div>
+
+  <div class="bracket-view">
+    <h2>Bracket 视图</h2>
+    <div id="bracket-display">click a tournament on the right to view</div>
+  </div>
+</div>
+
+<div class="tn-list">
+  <h3>Tournaments (registration)</h3>
+  <div id="tn-list">loading...</div>
+</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let myToken = null;
+let currentTnId = null;
+
+function setStatus(m) { $('status').textContent = m; }
+
+(async function init() {
+  const u = new URLSearchParams(location.search);
+  if (u.get('tid')) currentTnId = u.get('tid');
+  if (u.get('token')) {
+    $('my_token').value = u.get('token');
+    myToken = u.get('token');
+  }
+  if (currentTnId) await loadTournament(currentTnId);
+  fetchList();
+})();
+
+async function call(path, method='GET', body=null, params=null) {
+  if (params) {
+    const qs = new URLSearchParams(params).toString();
+    path += (path.includes('?') ? '&' : '?') + qs;
+  }
+  const headers = { 'Content-Type': 'application/json' };
+  if (myToken) headers['Authorization'] = 'Bearer ' + myToken;
+  const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  return await r.json();
+}
+
+async function createTournament() {
+  myToken = $('my_token').value.trim();
+  if (!myToken) { setStatus('need token'); return; }
+  const name = $('tn_name').value.trim() || ('Tournament ' + new Date().toLocaleString());
+  const size = parseInt($('tn_size').value);
+  const mode = $('tn_mode').value;
+  const r = await call('/api/v1/tournament/create', 'POST', null, { name, size: String(size), mode });
+  if (r.ok) {
+    currentTnId = r.tournament_id;
+    setStatus('✓ created ' + r.tournament_id);
+    loadTournament(r.tournament_id);
+    fetchList();
+  } else setStatus('✗ ' + (r.detail || 'create failed'));
+}
+
+async function registerTeamPrompt() {
+  if (!currentTnId) return;
+  const team_name = prompt('Team name?');
+  if (!team_name) return;
+  const captain_pid = prompt('Captain pid? (must be your pid)');
+  if (!captain_pid) return;
+  const mode_size = (currentTnMode === '1v1' ? 1 : (currentTnMode === '3v3' ? 3 : 5));
+  const players = prompt(`Player pids (JSON array, max ${mode_size})?`, `[${'"' + captain_pid + '"'}]`);
+  if (!players) return;
+  const r = await call('/api/v1/tournament/' + currentTnId + '/register_team', 'POST', null,
+    { team_name, captain_pid, players });
+  if (r.ok) { setStatus('✓ team registered, slot ' + r.team_id); loadTournament(currentTnId); }
+  else setStatus('✗ ' + (r.detail || 'register failed'));
+}
+
+let currentTnMode = '5v5';
+async function loadTournament(tid) {
+  currentTnId = tid;
+  const r = await call('/api/v1/tournament/' + tid);
+  if (!r.ok) { setStatus('✗ ' + (r.detail || 'load failed')); return; }
+  const t = r.tournament;
+  currentTnMode = t.mode;
+  let html = `<div style="font-size:13px"><b>${t.name}</b> (${t.mode})</div>
+    <div style="font-size:11px;color:#888">status: ${t.status} · size: ${t.size} · id: ${t.id}</div>
+    <div style="margin-top:6px"><b>Teams:</b> ${r.teams.length}/${t.size}
+      <ul style="margin:4px 0;padding-left:18px">`;
+  for (const team of r.teams) {
+    html += `<li>${team.team_name} (captain: ${team.captain_pid.slice(-8)}, players: ${team.players.length}) ${team.eliminated ? '❌' : ''}</li>`;
+  }
+  html += '</ul></div>';
+  $('ct-detail').innerHTML = html;
+  $('current-tn').style.display = 'block';
+  // Render bracket
+  renderBracket(t, r.teams);
+}
+
+function renderBracket(t, teams) {
+  const container = $('bracket-display');
+  if (t.status === 'registration') {
+    container.innerHTML = `<div style="color:#888;padding:20px;text-align:center">${teams.length}/${t.size} teams registered. Start the tournament to generate the bracket.</div>`;
+    return;
+  }
+  if (t.status === 'in_progress') {
+    try {
+      const bracket = typeof t.bracket === 'string' ? JSON.parse(t.bracket) : t.bracket;
+      const matches = typeof t.matches === 'string' ? JSON.parse(t.matches) : t.matches;
+      let html = '';
+      // Only round0 is auto-generated in MVP
+      const r0 = bracket.round0 || [];
+      const max = t.size / 2;
+      html += `<div class="bracket-round"><div class="round-title">Round 0 (${r0.length} matches, top ${max} advance)</div>`;
+      r0.forEach((m, i) => {
+        html += `<div class="match-card">
+          <span class="team-name">${m.team1}</span>
+          <span class="vs">vs</span>
+          <span class="team-name">${m.team2}</span>
+        </div>
+        <div class="match-card" style="background:#0a0e14">
+          <span style="color:#888;font-size:10px">match_id</span>
+          <span></span>
+          <span style="color:#5fafff;font-size:10px;text-align:right"><a href="/api/v1/arena/match/${m.match_id}?lang=en" target="_blank">${m.match_id}</a></span>
+        </div>`;
+      });
+      html += '</div>';
+      // Future rounds placeholder
+      for (let r = 1; r <= Math.log2(t.size) - 1; r++) {
+        html += `<div class="bracket-round"><div class="round-title">Round ${r} (TBD)</div>
+          <div style="color:#888;font-size:11px;padding:6px">winners from previous round will be auto-paired</div></div>`;
+      }
+      container.innerHTML = html;
+    } catch (e) {
+      container.innerHTML = '<div style="color:#ff5f5f">parse bracket failed: ' + e.message + '</div>';
+    }
+    return;
+  }
+  if (t.status === 'done') {
+    container.innerHTML = `<div style="color:#88ff88;padding:20px;text-align:center">🏆 Tournament over. Winner: ${t.winner_team || '?'}</div>`;
+    return;
+  }
+  container.innerHTML = `<div style="color:#888">status: ${t.status}</div>`;
+}
+
+async function startTournament() {
+  if (!currentTnId) return;
+  if (!confirm('Start tournament? Bracket will be locked.')) return;
+  const r = await call('/api/v1/tournament/' + currentTnId + '/start', 'POST');
+  if (r.ok) { setStatus('✓ tournament started'); loadTournament(currentTnId); }
+  else setStatus('✗ ' + (r.detail || 'start failed'));
+}
+
+async function fetchList() {
+  try {
+    const r = await call('/api/v1/tournaments', 'GET', null, { status: 'registration' });
+    if (!r.ok) return;
+    if (!r.tournaments || r.tournaments.length === 0) {
+      $('tn-list').innerHTML = '<div style="color:#888">no tournaments in registration. Create one!</div>';
+      return;
+    }
+    let html = '';
+    r.tournaments.forEach(t => {
+      html += `<div class="tn-list-item" onclick="loadTournament('${t.id}')">
+        <span><b>${t.name}</b> <span style="color:#888;font-size:11px">${t.mode}/${t.size} teams · ${t.id}</span></span>
+        <span style="color:#88ff88">${t.status}</span>
+      </div>`;
+    });
+    $('tn-list').innerHTML = html;
+  } catch (e) { setStatus('ERR ' + e.message); }
+}
+
+setInterval(fetchList, 5000);
+</script>
+</body>
+</html>
