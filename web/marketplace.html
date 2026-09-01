@@ -41,6 +41,15 @@
 .detail-panel pre { background: #050810; padding: 8px; font-size: 12px; overflow-x: auto; }
 .credit-display { padding: 6px 12px; background: #ffcc00; color: #0a0e14;
   display: inline-block; border-radius: 4px; font-weight: bold; }
+
+.profit-panel { padding: 12px; background: #1a2030; border: 1px solid #ffd700; margin-top: 16px; }
+.profit-panel h2 { color: #ffd700; margin-bottom: 8px; }
+.profit-body { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.profit-card { padding: 8px; background: #050810; border: 1px solid #333; }
+.profit-card .lbl { color: #888; font-size: 11px; }
+.profit-card .val { color: #ffcc00; font-size: 18px; font-weight: bold; }
+.profit-card.green .val { color: #88ff88; }
+.profit-card.red .val { color: #ff5f5f; }
 </style>
 </head>
 <body>
@@ -99,6 +108,27 @@
     </div>
     <div id="listings">loading...</div>
   </div>
+</div>
+
+
+
+<div id="auto-panel" class="profit-panel" style="border-color:#88ff88">
+  <h2 style="color:#88ff88">🤖 AI Agent Auto-Pricing / Bot 自动调价</h2>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+    <input id="auto_pid" type="text" placeholder="your bot pid" style="flex:1;background:#050810;color:#ffcc00;border:1px solid #5fb3d4;padding:6px;font-family:inherit">
+    <button onclick="getAutoPrice()" style="background:#5fb3d4;color:#0a0e14;border:none;padding:6px 12px;cursor:pointer;font-weight:bold">Calc Price</button>
+    <button onclick="autoList()" style="background:#88ff88;color:#0a0e14;border:none;padding:6px 12px;cursor:pointer;font-weight:bold">🤖 Auto-List</button>
+  </div>
+  <div id="auto-body" class="profit-body" style="grid-template-columns:repeat(3,1fr)"></div>
+</div>
+
+<div id="profit-panel" class="profit-panel">
+  <h2>📊 Profitability Report / 财务报告</h2>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+    <input id="profit_pid" type="text" placeholder="bot pid (or use ?pid= in URL)" style="flex:1;background:#050810;color:#ffcc00;border:1px solid #5fb3d4;padding:6px;font-family:inherit">
+    <button onclick="fetchProfit()" style="background:#5fb3d4;color:#0a0e14;border:none;padding:6px 12px;cursor:pointer;font-weight:bold">View Report</button>
+  </div>
+  <div id="profit-body" class="profit-body"></div>
 </div>
 
 <div id="detail" class="detail-panel"></div>
@@ -246,7 +276,74 @@ async function delistListing(listingId) {
   if (r.ok) { setStatus('✓ delisted'); fetchListings(); }
 }
 
+
+async function getAutoPrice() {
+  const pid = document.getElementById('auto_pid').value.trim();
+  if (!pid) { alert('need pid'); return; }
+  const r = await fetch('/api/v1/marketplace/auto_price/' + encodeURIComponent(pid));
+  const d = await r.json();
+  if (!d.ok) { alert(d.detail || 'failed'); return; }
+  const b = d.breakdown;
+  const html = `
+    <div class="profit-card green"><div class="lbl">SUGGESTED PRICE</div><div class="val">${d.suggested_price_credits} 💰</div></div>
+    <div class="profit-card"><div class="lbl">base</div><div class="val">${b.base}</div></div>
+    <div class="profit-card"><div class="lbl">fitness bonus</div><div class="val">${b.fitness_bonus}</div></div>
+    <div class="profit-card"><div class="lbl">win-rate bonus</div><div class="val">${b.win_rate_bonus}</div></div>
+    <div class="profit-card"><div class="lbl">experience bonus</div><div class="val">${b.experience_bonus}</div></div>
+    <div class="profit-card"><div class="lbl">trend bonus</div><div class="val">${b.trend_bonus}</div></div>
+    <div class="profit-card"><div class="lbl">W/L</div><div class="val">${d.bot_stats.wins}/${d.bot_stats.losses}</div></div>
+    <div class="profit-card"><div class="lbl">win rate</div><div class="val">${(d.bot_stats.win_rate*100).toFixed(0)}%</div></div>
+    <div class="profit-card"><div class="lbl">avg fitness</div><div class="val">${d.bot_stats.avg_fitness}</div></div>
+  `;
+  document.getElementById('auto-body').innerHTML = html;
+}
+async function autoList() {
+  const pid = document.getElementById('auto_pid').value.trim();
+  if (!pid) { alert('need pid'); return; }
+  if (!myToken) { alert('need token (top-right input)'); return; }
+  const r = await fetch('/api/v1/marketplace/auto_list?bot_pid=' + encodeURIComponent(pid) + '&force=false', {
+    method: 'POST', headers: { 'Authorization': 'Bearer ' + myToken }
+  });
+  const d = await r.json();
+  if (!d.ok) { alert(d.detail || 'failed'); return; }
+  alert('✓ ' + d.status + ' — listing ' + d.listing_id + ' @ ' + d.suggested_price_credits + '💰');
+  fetchListings();
+}
+
 setInterval(fetchListings, 8000);
+
+async function fetchProfit() {
+  const pid = document.getElementById('profit_pid').value.trim();
+  if (!pid) { alert('need pid'); return; }
+  const r = await fetch('/api/v1/marketplace/profitability/' + encodeURIComponent(pid));
+  const d = await r.json();
+  if (!d.ok) { document.getElementById('profit-body').innerHTML = '<div style="color:#ff5f5f">' + (d.detail || 'failed') + '</div>'; return; }
+  const color = d.roi_per_match >= 1 ? 'green' : (d.roi_per_match <= 0 ? 'red' : '');
+  const cards = [
+    ['💰 current balance', d.current_balance, ''],
+    ['📈 lifetime earned', d.lifetime_credits_earned, ''],
+    ['📉 lifetime spent', d.lifetime_credits_spent, ''],
+    ['💎 ROI/match', d.roi_per_match.toFixed(3), color],
+    ['🎮 matches played', d.matches_played, ''],
+    ['🏆 wins', d.wins, 'green'],
+    ['💀 losses', d.losses, 'red'],
+    ['📊 win rate', (d.win_rate * 100).toFixed(1) + '%', ''],
+    ['🤝 sales count', d.marketplace_sales_count, ''],
+    ['💵 sales total', d.marketplace_sales_total_credits, 'green'],
+    ['🛒 purchases count', d.marketplace_purchases_count, ''],
+    ['📋 active listings', d.active_listings, ''],
+    ['⭐ best sale price', d.best_sale_price_credits, 'green'],
+    ['📊 last fitness', d.last_fitness, d.last_fitness > 0 ? 'green' : 'red'],
+    ['📊 avg fitness', d.avg_fitness, d.avg_fitness > 0 ? 'green' : 'red'],
+    ['📜 fitness samples', d.fitness_history_size, ''],
+  ];
+  let html = '';
+  cards.forEach(([lbl, val, cls]) => {
+    html += `<div class="profit-card ${cls}"><div class="lbl">${lbl}</div><div class="val">${val}</div></div>`;
+  });
+  document.getElementById('profit-body').innerHTML = html;
+}
+
 setInterval(fetchCredits, 15000);
 </script>
 </body>
