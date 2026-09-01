@@ -268,6 +268,47 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     FOREIGN KEY (pid) REFERENCES players(id)
 );
 
+-- Add credit column to players (separate from gold: gold = in-game, credit = marketplace currency)
+-- SQLite ALTER TABLE can't add column with default + NOT NULL in one statement, so we use a separate CREATE TABLE approach
+CREATE TABLE IF NOT EXISTS player_credits (
+    pid         TEXT PRIMARY KEY,
+    credits     INTEGER DEFAULT 0,  -- marketplace credits (1 credit = 1 fitness-point equivalent)
+    earned      INTEGER DEFAULT 0,  -- lifetime earned
+    spent       INTEGER DEFAULT 0,  -- lifetime spent
+    last_active REAL NOT NULL,
+    FOREIGN KEY (pid) REFERENCES players(id)
+);
+
+CREATE TABLE IF NOT EXISTS bot_listings (
+    id              TEXT PRIMARY KEY,
+    seller_pid      TEXT NOT NULL,             -- who owns the bot
+    bot_pid         TEXT NOT NULL,             -- which bot is being sold
+    title           TEXT NOT NULL,
+    description     TEXT DEFAULT '',
+    price_credits   INTEGER NOT NULL,         -- marketplace price
+    status          TEXT DEFAULT 'active',    -- active | sold | removed
+    times_sold      INTEGER DEFAULT 0,
+    created_at      REAL NOT NULL,
+    FOREIGN KEY (seller_pid) REFERENCES players(id),
+    FOREIGN KEY (bot_pid) REFERENCES players(id)
+);
+
+CREATE TABLE IF NOT EXISTS bot_purchases (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id      TEXT NOT NULL,
+    buyer_pid       TEXT NOT NULL,
+    seller_pid      TEXT NOT NULL,
+    bot_pid         TEXT NOT NULL,
+    price_credits   INTEGER NOT NULL,
+    -- Snapshot of the bot's strategy at time of purchase
+    strategy_snapshot TEXT DEFAULT '{}',
+    created_at      REAL NOT NULL,
+    FOREIGN KEY (listing_id) REFERENCES bot_listings(id),
+    FOREIGN KEY (buyer_pid) REFERENCES players(id),
+    FOREIGN KEY (seller_pid) REFERENCES players(id),
+    FOREIGN KEY (bot_pid) REFERENCES players(id)
+);
+
 """
 
 

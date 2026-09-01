@@ -578,6 +578,295 @@ def chat_list(scope: str = Query("global"),
 
 
 
+
+
+
+def _get_credits(pid: str) -> int:
+    """Read player's current credit balance."""
+    c = db()
+    cur = c.cursor()
+    cur.execute("SELECT credits FROM player_credits WHERE pid=?", (pid,))
+    row = cur.fetchone()
+    if row is None:
+        cur.execute("INSERT OR IGNORE INTO player_credits (pid, credits, last_active) VALUES (?, 0, ?)",
+                    (pid, time.time()))
+        c.commit()
+        return 0
+    return row["credits"]
+
+
+def _award_credits(pid: str, amount: int, reason: str = "") -> None:
+    """Add credits to a player (called after match wins etc.)."""
+    c = db()
+    cur = c.cursor()
+    cur.execute("""INSERT INTO player_credits (pid, credits, earned, last_active)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(pid) DO UPDATE SET credits=credits+?,
+                                                  earned=earned+?,
+                                                  last_active=?""",
+                (pid, amount, amount, time.time(),
+                 amount, amount, time.time()))
+    c.commit()
+
+
+def _charge_credits(pid: str, amount: int) -> bool:
+    """Deduct credits atomically. Returns True if successful."""
+    c = db()
+    cur = c.cursor()
+    cur.execute("UPDATE player_credits SET credits=credits-?, spent=spent+?, last_active=? "
+                "WHERE pid=? AND credits>=?",
+                (amount, amount, time.time(), pid, amount))
+    if cur.rowcount == 0:
+        return False
+    c.commit()
+    return True
+
+
+@app.get("/api/v1/marketplace/browse")
+def marketplace_browse(lang: str = Query("en"),
+                        sort_by: str = Query("fitness"),  # fitness | price | recent
+                        limit: int = Query(50)):
+    """Browse all active bot listings, sorted by fitness/price/recent.
+
+    Returns each listing + the bot's fitness stats + strategy profile preview.
+    """
+    from server.db import connect as _db
+    import json as _json
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        order = "bp.price_credits ASC" if sort_by == "price" else                 "bp.times_sold DESC, bp.created_at DESC" if sort_by == "recent" else                 "sp_wins DESC, sp_fitness_history DESC"
+        cur.execute(f"""SELECT bp.id, bp.seller_pid, bp.bot_pid, bp.title, bp.description,
+                               bp.price_credits, bp.times_sold, bp.created_at,
+                               p.name AS seller_name,
+                               sp.wins AS sp_wins, sp.losses AS sp_losses,
+                               sp.matches_played AS sp_matches,
+                               sp.fitness_history AS sp_fitness_history,
+                               sp.hp_retreat_threshold AS sp_hp_thr,
+                               sp.ult_teamfight_min_enemies AS sp_ult_min_e
+                        FROM bot_listings bp
+                        LEFT JOIN players p ON p.id = bp.seller_pid
+                        LEFT JOIN bot_strategy_profiles sp ON sp.pid = bp.bot_pid
+                        WHERE bp.status='active'
+                        ORDER BY {order}
+                        LIMIT ?""", (limit,))
+        rows = cur.fetchall()
+    out = []
+    for r in rows:
+        hist_json = r["sp_fitness_history"] if "sp_fitness_history" in r.keys() else r["fitness_history"]
+        hist = _json.loads(hist_json) if hist_json else []
+        last_fit = hist[-1] if hist else 0
+        avg_fit = sum(hist) / len(hist) if hist else 0
+        out.append({
+            "listing_id": r["id"],
+            "seller_pid": r["seller_pid"],
+            "seller_name": r["seller_name"],
+            "bot_pid": r["bot_pid"],
+            "title": r["title"],
+            "description": r["description"],
+            "price_credits": r["price_credits"],
+            "times_sold": r["times_sold"],
+            "created_at": r["created_at"],
+            "bot_stats": {
+                "wins": r["sp_wins"] or 0,
+                "losses": r["sp_losses"] or 0,
+                "matches": r["sp_matches"] or 0,
+                "last_fitness": round(last_fit, 2),
+                "avg_fitness": round(avg_fit, 2),
+                "hp_retreat_threshold": r["sp_hp_thr"] or 0.30,
+                "ult_teamfight_min_enemies": r["sp_ult_min_e"] or 1,
+            },
+        })
+    return {"ok": True, "lang": lang, "sort_by": sort_by, "listings": out}
+
+
+@app.post("/api/v1/marketplace/list")
+def marketplace_list(req: Request,
+                     bot_pid: str = Query(...),
+                     title: str = Query(...),
+                     description: str = Query(""),
+                     price_credits: int = Query(20, ge=1, le=1000),
+                     lang: str = Query("en")):
+    """List your trained bot on the marketplace."""
+    import secrets as _sec
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        seller_pid = row["player_id"]
+        # Verify seller owns the bot (bot_pid == seller_pid)
+        if bot_pid != seller_pid:
+            raise HTTPException(403, "you can only list your own bot")
+        # Verify bot has training profile
+        cur.execute("SELECT wins, matches_played FROM bot_strategy_profiles WHERE pid=?", (bot_pid,))
+        prof_row = cur.fetchone()
+        if prof_row is None:
+            raise HTTPException(400, "bot has no training profile — must play matches first")
+        listing_id = "lst_" + _sec.token_hex(4)
+        cur.execute("""INSERT INTO bot_listings
+                       (id, seller_pid, bot_pid, title, description, price_credits, status, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'active', ?)""",
+                    (listing_id, seller_pid, bot_pid, title, description, price_credits, time.time()))
+        c.commit()
+    return {"ok": True, "lang": lang, "listing_id": listing_id, "title": title,
+            "price_credits": price_credits, "status": "active"}
+
+
+@app.get("/api/v1/marketplace/bot/{bot_pid}")
+def marketplace_bot_detail(bot_pid: str, lang: str = Query("en")):
+    """Full detail of a bot — includes strategy_profile snapshot for buyers."""
+    import json as _json
+    from server.db import connect as _db
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("""SELECT p.id, p.name, p.cls, p.level, p.rank_rating, p.rank_tier,
+                              sp.wins, sp.losses, sp.matches_played, sp.fitness_history,
+                              sp.hp_retreat_threshold, sp.teamfight_radius, sp.teamfight_min_allies,
+                              sp.teamfight_min_enemies, sp.ult_teamfight_min_allies,
+                              sp.ult_teamfight_min_enemies, sp.ult_threshold, sp.last_updated
+                       FROM players p
+                       LEFT JOIN bot_strategy_profiles sp ON sp.pid = p.id
+                       WHERE p.id=?""", (bot_pid,))
+        b = cur.fetchone()
+        if b is None:
+            raise HTTPException(404, "bot not found")
+        # Find active listing
+        cur.execute("""SELECT id, price_credits, description, title, times_sold, created_at
+                       FROM bot_listings
+                       WHERE bot_pid=? AND status='active'
+                       LIMIT 1""", (bot_pid,))
+        listing = cur.fetchone()
+    hist = _json.loads(b["fitness_history"]) if b["fitness_history"] else []
+    return {"ok": True, "lang": lang, "bot": {k: b[k] for k in b.keys()},
+            "fitness_history": hist[-30:],
+            "avg_fitness": round(sum(hist) / len(hist), 2) if hist else 0,
+            "last_fitness": round(hist[-1], 2) if hist else 0,
+            "listing": {k: listing[k] for k in listing.keys()} if listing else None}
+
+
+@app.post("/api/v1/marketplace/buy")
+def marketplace_buy(req: Request,
+                    listing_id: str = Query(...),
+                    lang: str = Query("en")):
+    """Buy a bot. Credits transfer from buyer to seller.
+    Bot's strategy_profile is snapshotted into bot_purchases for buyer reference.
+    Buyer also gets the strategy_profile applied to one of their bots (if they have one).
+    """
+    import json as _json
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        buyer_pid = row["player_id"]
+        cur.execute("SELECT * FROM bot_listings WHERE id=?", (listing_id,))
+        listing = cur.fetchone()
+        if listing is None:
+            raise HTTPException(404, "listing not found")
+        if listing["status"] != "active":
+            raise HTTPException(400, f"listing is {listing['status']}")
+        if listing["seller_pid"] == buyer_pid:
+            raise HTTPException(400, "cannot buy your own listing")
+        price = listing["price_credits"]
+        # Check buyer has enough credits
+        buyer_credits = _get_credits(buyer_pid)
+        if buyer_credits < price:
+            raise HTTPException(402, f"insufficient credits (have {buyer_credits}, need {price})")
+        # Snapshot seller bot's strategy
+        cur.execute("""SELECT wins, losses, matches_played, fitness_history,
+                              hp_retreat_threshold, teamfight_radius, teamfight_min_allies,
+                              teamfight_min_enemies, ult_teamfight_min_allies,
+                              ult_teamfight_min_enemies, ult_threshold
+                       FROM bot_strategy_profiles WHERE pid=?""",
+ (listing["bot_pid"],))
+        prof = cur.fetchone()
+        snapshot = _json.dumps({k: prof[k] for k in prof.keys()} if prof else {})
+        # Atomic: charge buyer + credit seller
+        if not _charge_credits(buyer_pid, price):
+            raise HTTPException(402, "credit charge failed")
+        _award_credits(listing["seller_pid"], price, reason="sale")
+        # Record purchase
+        cur.execute("""INSERT INTO bot_purchases
+                       (listing_id, buyer_pid, seller_pid, bot_pid, price_credits, strategy_snapshot, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (listing_id, buyer_pid, listing["seller_pid"],
+                     listing["bot_pid"], price, snapshot, time.time()))
+        cur.execute("UPDATE bot_listings SET times_sold=times_sold+1 WHERE id=?",
+                    (listing_id,))
+        c.commit()
+    return {"ok": True, "lang": lang, "listing_id": listing_id, "bot_pid": listing["bot_pid"],
+            "price_credits": price, "buyer_credits_remaining": buyer_credits - price,
+            "snapshot": snapshot}
+
+
+@app.get("/api/v1/marketplace/credits")
+def marketplace_my_credits(req: Request, lang: str = Query("en")):
+    """Check your credit balance."""
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        pid = row["player_id"]
+        cur.execute("SELECT credits, earned, spent, last_active FROM player_credits WHERE pid=?", (pid,))
+        r = cur.fetchone()
+    return {"ok": True, "lang": lang, "pid": pid,
+            "credits": r["credits"] if r else 0,
+            "earned": r["earned"] if r else 0,
+            "spent": r["spent"] if r else 0}
+
+
+@app.post("/api/v1/marketplace/delist/{listing_id}")
+def marketplace_delist(req: Request, listing_id: str, lang: str = Query("en")):
+    """Owner removes a listing."""
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        pid = row["player_id"]
+        cur.execute("SELECT seller_pid, status FROM bot_listings WHERE id=?", (listing_id,))
+        listing = cur.fetchone()
+        if listing is None:
+            raise HTTPException(404, "listing not found")
+        if listing["seller_pid"] != pid:
+            raise HTTPException(403, "only seller can delist")
+        if listing["status"] != "active":
+            raise HTTPException(400, f"listing already {listing['status']}")
+        cur.execute("UPDATE bot_listings SET status='removed' WHERE id=?", (listing_id,))
+        c.commit()
+    return {"ok": True, "lang": lang, "listing_id": listing_id, "status": "removed"}
+
+
+
 @app.get("/trade")
 @app.get("/trade.html")
 def trade_page():
@@ -590,6 +879,13 @@ def trade_page():
 def chat_page():
     """Global chat UI (v9) — spectator hangout."""
     return FileResponse(str(WEB_DIR / "chat.html"))
+
+
+@app.get("/marketplace")
+@app.get("/marketplace.html")
+def marketplace_page():
+    """Bot marketplace UI (v9) — buy/sell trained bots with fake credits."""
+    return FileResponse(str(WEB_DIR / "marketplace.html"))
 
 
 @app.get("/tournament")

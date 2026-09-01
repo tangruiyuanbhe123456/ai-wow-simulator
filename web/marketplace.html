@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Bot 市场 / Marketplace (v9)</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.m-container { max-width: 1300px; margin: 0 auto; }
+.m-header { padding: 12px; background: #1a2030; border: 1px solid #ffcc00; margin-bottom: 12px; }
+.m-grid { display: grid; grid-template-columns: 320px 1fr; gap: 16px; }
+.list-panel { padding: 12px; background: #1a2030; border: 1px solid #5fb3d4; }
+.list-panel h2 { color: #5fb3d4; margin-bottom: 8px; font-size: 16px; }
+.list-panel input, .list-panel select {
+  background: #050810; color: #ffcc00; border: 1px solid #5fb3d4;
+  padding: 6px 10px; font-family: inherit; font-size: 13px; width: 100%;
+  margin-bottom: 8px; box-sizing: border-box;
+}
+.list-panel button {
+  background: #ffcc00; color: #0a0e14; border: none; padding: 8px 16px;
+  font-weight: bold; cursor: pointer; width: 100%; margin-bottom: 4px;
+}
+.browse-panel { padding: 12px; background: #0a0e14; }
+.browse-panel h2 { color: #ffcc00; margin-bottom: 8px; }
+.filters { margin-bottom: 12px; display: flex; gap: 6px; }
+.filters button { background: #5fb3d4; color: #0a0e14; border: none; padding: 4px 12px;
+  cursor: pointer; font-weight: bold; }
+.listing-card {
+  border: 1px solid #333; padding: 10px; margin-bottom: 8px;
+  background: #050810; display: grid;
+  grid-template-columns: 1fr 100px 100px 100px;
+  gap: 8px; align-items: center;
+}
+.listing-card .title { color: #ffcc00; font-weight: bold; font-size: 14px; }
+.listing-card .seller { color: #5fafff; font-size: 11px; }
+.listing-card .stats { color: #88ff88; font-size: 11px; font-family: monospace; }
+.listing-card .price { color: #ffd700; font-size: 16px; text-align: center; font-weight: bold; }
+.listing-card button { background: #88ff88; color: #0a0e14; border: none; padding: 4px 8px;
+  cursor: pointer; font-weight: bold; }
+.detail-panel { padding: 12px; background: #1a2030; border: 1px solid #ffcc00;
+  margin-top: 12px; display: none; }
+.detail-panel pre { background: #050810; padding: 8px; font-size: 12px; overflow-x: auto; }
+.credit-display { padding: 6px 12px; background: #ffcc00; color: #0a0e14;
+  display: inline-block; border-radius: 4px; font-weight: bold; }
+</style>
+</head>
+<body>
+<div class="m-container">
+<header>
+  <h1>🏪 Bot 市场 <span class="en">| Marketplace (v9)</span></h1>
+  <div id="controls">
+    <a href="/" style="color:#5fb3d4">← Main</a>
+    <a href="/lobby.html" style="color:#5fafff">/lobby</a>
+    <a href="/training.html" style="color:#5fafff">/training</a>
+    <a href="/tournament.html" style="color:#5fafff">/tournament</a>
+    <span id="status">loading...</span>
+    <span id="credits" class="credit-display" style="margin-left:8px">💰 0 credits</span>
+  </div>
+</header>
+
+<div class="m-header">
+  <h2 style="color:#ffcc00">交易 AI 训练好的 bot / Trade trained bots</h2>
+  <p style="font-size:13px">
+    <b>How it works / 怎么用:</b><br>
+    1. AI bot wins match → bot owner 自动+10 credits (loss: +2 credits)<br>
+    2. Owner lists bot on marketplace with a price<br>
+    3. Buyers browse and buy (credits transfer to seller)<br>
+    4. Buyer gets snapshot of bot's strategy_profile (可应用到自己的 bot)
+  </p>
+  <p style="font-size:11px;color:#888">MVP — credit 是虚拟货币，不能换真钱。下一步接 Gumroad / Stripe。MVP — credit is virtual, no real-money redemption yet. Gumroad/Stripe integration is the next step.</p>
+</div>
+
+<div class="m-grid">
+  <div class="list-panel">
+    <h2>上架我的 bot / List My Bot</h2>
+    <label>Your token:</label>
+    <input id="my_token" type="text" placeholder="bearer token (required)">
+    <label>Title:</label>
+    <input id="list_title" type="text" placeholder="e.g. PvP warrior tier-3 with dragon armor">
+    <label>Description:</label>
+    <input id="list_desc" type="text" placeholder="why is this bot good?">
+    <label>Price (credits):</label>
+    <input id="list_price" type="number" value="20" min="1" max="1000">
+    <button onclick="listMyBot()">List 上架</button>
+    <button onclick="fetchCredits()" style="background:#5fb3d4">💰 Refresh Credits</button>
+    <button onclick="fetchMyListings()" style="background:#ff5f5f;color:white">📋 My Active Listings</button>
+    <div id="my-listings" style="margin-top:8px;font-size:11px;color:#888"></div>
+  </div>
+
+  <div class="browse-panel">
+    <h2>浏览 / Browse</h2>
+    <div class="filters">
+      <label>Sort by:</label>
+      <select id="sort_by">
+        <option value="fitness" selected>Fitness (wins × avg)</option>
+        <option value="price">Price (low→high)</option>
+        <option value="recent">Recent</option>
+      </select>
+      <button onclick="fetchListings()">Refresh</button>
+    </div>
+    <div id="listings">loading...</div>
+  </div>
+</div>
+
+<div id="detail" class="detail-panel"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let myToken = null;
+let myPid = null;
+
+function setStatus(m) { $('status').textContent = m; }
+function escapeHtml(s) {
+  return String(s || '').replace(/[<>&"']/g, c => ({'<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+
+(async function init() {
+  const u = new URLSearchParams(location.search);
+  myPid = u.get('pid');
+  if (u.get('token')) {
+    $('my_token').value = u.get('token');
+    myToken = u.get('token');
+  }
+  fetchListings();
+  fetchCredits();
+})();
+
+async function call(path, method='GET', body=null, params=null) {
+  if (params) {
+    const qs = new URLSearchParams(params).toString();
+    path += (path.includes('?') ? '&' : '?') + qs;
+  }
+  const headers = { 'Content-Type': 'application/json' };
+  if (myToken) headers['Authorization'] = 'Bearer ' + myToken;
+  const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  return await r.json();
+}
+
+async function fetchCredits() {
+  if (!myToken) {
+    $('credits').textContent = '💰 ? credits';
+    return;
+  }
+  const r = await call('/api/v1/marketplace/credits', 'GET');
+  if (r.ok) {
+    $('credits').textContent = `💰 ${r.credits} credits (earned ${r.earned})`;
+  }
+}
+
+async function listMyBot() {
+  myToken = $('my_token').value.trim();
+  if (!myToken || !myPid) { setStatus('need token + ?pid= in URL'); return; }
+  const title = $('list_title').value.trim() || ('Bot ' + myPid.slice(-6));
+  const desc = $('list_desc').value.trim();
+  const price = parseInt($('list_price').value || '20', 10);
+  const r = await call('/api/v1/marketplace/list', 'POST', null,
+    { bot_pid: myPid, title, description: desc, price_credits: String(price) });
+  if (r.ok) { setStatus('✓ listed: ' + r.listing_id); fetchListings(); }
+  else setStatus('✗ ' + (r.detail || 'list failed'));
+}
+
+async function buyBot(listingId, price) {
+  if (!myToken) { setStatus('need token to buy'); return; }
+  if (!confirm(`Buy this bot for ${price} credits?`)) return;
+  const r = await call('/api/v1/marketplace/buy', 'POST', null, { listing_id: listingId });
+  if (r.ok) {
+    setStatus('✓ bought! strategy snapshot downloaded');
+    fetchCredits();
+    fetchListings();
+    loadDetail(r.bot_pid, r.snapshot);
+  } else setStatus('✗ ' + (r.detail || 'buy failed'));
+}
+
+async function fetchListings() {
+  try {
+    const sort = $('sort_by').value;
+    const r = await call('/api/v1/marketplace/browse', 'GET', null, { sort_by: sort });
+    if (!r.ok) return;
+    if (!r.listings || r.listings.length === 0) {
+      $('listings').innerHTML = '<div style="color:#888;padding:20px;text-align:center">No listings yet. Run training script first or list your own bot!</div>';
+      return;
+    }
+    let html = '';
+    r.listings.forEach(l => {
+      const bs = l.bot_stats || {};
+      const statsTxt = `W${bs.wins || 0} L${bs.losses || 0} avg_fit=${bs.avg_fitness || 0}`;
+      html += `<div class="listing-card">
+        <div>
+          <div class="title">${escapeHtml(l.title)}</div>
+          <div class="seller">by ${escapeHtml(l.seller_name || '?')} · ${l.times_sold} sold</div>
+          <div style="color:#888;font-size:11px;margin-top:4px">${escapeHtml(l.description || '')}</div>
+          <div class="stats">${statsTxt} · hp_thr=${(bs.hp_retreat_threshold || 0.3).toFixed(2)}</div>
+        </div>
+        <div class="price">${l.price_credits}💰</div>
+        <div><button onclick='loadDetail("${l.bot_pid}")'>view</button></div>
+        <div><button onclick='buyBot("${l.listing_id}", ${l.price_credits})'>buy</button></div>
+      </div>`;
+    });
+    $('listings').innerHTML = html;
+  } catch (e) { setStatus('ERR ' + e.message); }
+}
+
+async function loadDetail(botPid, snapshot) {
+  const r = await call('/api/v1/marketplace/bot/' + encodeURIComponent(botPid));
+  if (!r.ok) return;
+  const b = r.bot;
+  const fh = r.fitness_history || [];
+  let fitHtml = '<div style="display:flex;gap:1px;align-items:end;height:40px;margin-top:6px">';
+  fh.slice(-30).forEach(f => {
+    const color = f > 0 ? '#88ff88' : (f < 0 ? '#ff5f5f' : '#888');
+    fitHtml += `<div style="background:${color};width:8px;height:${Math.max(2, Math.abs(f) * 20)}px" title="${f.toFixed(2)}"></div>`;
+  });
+  fitHtml += '</div>';
+  const snapshotStr = snapshot || (r.listing ? 'snapshot will be created on purchase' : 'no purchase yet');
+  $('detail').style.display = 'block';
+  $('detail').innerHTML = `<h2 style="color:#ffcc00">Bot: ${escapeHtml(b.name)} (${escapeHtml(b.id.slice(-8))})</h2>
+    <div style="font-size:13px;color:#888">cls=${escapeHtml(b.cls)} level=${b.level} rank=${escapeHtml(b.rank_tier)} (${b.rank_rating})</div>
+    <div style="margin-top:6px"><b>Records:</b> W${b.wins} L${b.losses} M${b.matches_played} avg_fit=${r.avg_fitness}</div>
+    <div><b>Fitness history:</b>${fitHtml}</div>
+    <div><b>Strategy:</b> hp_thr=${b.hp_retreat_threshold} tf_radius=${b.teamfight_radius} tf_min_a=${b.teamfight_min_allies} tf_min_e=${b.teamfight_min_enemies} ult_min_a=${b.ult_teamfight_min_allies} ult_min_e=${b.ult_teamfight_min_enemies} ult_thr=${b.ult_threshold}</div>
+    <h3 style="margin-top:8px">Strategy snapshot (last purchase):</h3>
+    <pre>${escapeHtml(snapshotStr)}</pre>
+    ${r.listing ? `<div style="margin-top:8px"><b>Listed:</b> ${escapeHtml(r.listing.title)} - ${r.listing.price_credits} credits - <button onclick='buyBot("${r.listing.id}", ${r.listing.price_credits})'>Buy now</button></div>` : '<div style="margin-top:8px;color:#888">not currently listed</div>'}`;
+}
+
+async function fetchMyListings() {
+  if (!myPid) return;
+  // Browse with our pid filter — API doesn't have filter, just show all
+  const r = await call('/api/v1/marketplace/browse', 'GET');
+  if (!r.ok) return;
+  const mine = (r.listings || []).filter(l => l.seller_pid === myPid);
+  if (mine.length === 0) {
+    $('my-listings').innerHTML = 'no active listings';
+    return;
+  }
+  let html = '<b>My listings:</b><br>';
+  mine.forEach(l => {
+    html += `<div style="padding:2px 0">${l.title} - ${l.price_credits}💰 - <a href="javascript:delistListing('${l.listing_id}')">delist</a></div>`;
+  });
+  $('my-listings').innerHTML = html;
+}
+
+async function delistListing(listingId) {
+  if (!confirm('Delist this bot?')) return;
+  const r = await call('/api/v1/marketplace/delist/' + listingId, 'POST');
+  if (r.ok) { setStatus('✓ delisted'); fetchListings(); }
+}
+
+setInterval(fetchListings, 8000);
+setInterval(fetchCredits, 15000);
+</script>
+</body>
+</html>
