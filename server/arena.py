@@ -1188,6 +1188,124 @@ def _tick_item_actives_for_one(a, m, tick_n):
 
 
 
+
+
+def _auto_trigger_tournament_next_round(match_id: str) -> None:
+    """If a tournament's current round is fully resolved AND a next round
+    bracket exists (from /api/v1/tournament/<id>/advance), spawn the next
+    round's matches automatically.
+    """
+    import json as _json, threading as _th, time as _t
+    try:
+        from server.db import connect as _db
+        from server import arena_draft as _draft_mod
+        with _db_lock:
+            c = _db()
+            cur = c.cursor()
+            cur.execute("SELECT id, bracket, mode, size FROM tournaments "
+                        "WHERE status='in_progress' AND matches LIKE ?",
+                        (f'%"{match_id}"%',))
+            t = cur.fetchone()
+            if t is None:
+                return
+            tid = t["id"]
+            bracket = _json.loads(t["bracket"])
+            mode = t["mode"]
+            size = t["size"]
+            matches = _json.loads(t["matches"])
+            # Find current round
+            current_round = 0
+            for k in bracket.keys():
+                rn = int(k.replace("round", ""))
+                current_round = max(current_round, rn)
+            current_key = f"round{current_round}"
+            if current_key not in bracket:
+                return
+            current_matches = bracket[current_key]
+            if not all(m.get("winner") for m in current_matches):
+                return  # not all winners yet
+            # Check if next round bracket already exists (manually advanced)
+            next_round = current_round + 1
+            next_key = f"round{next_round}"
+            if next_key in bracket and bracket[next_key]:
+                # Already exists — check if matches created
+                if all(any(m["slot"] == b["slot"] for m in bracket[next_key])
+                       for b in bracket[next_key]):
+                    # All slots have entries — were matches spawned?
+                    next_match_ids = [bracket[next_key][i]["match_id"]
+                                     for i in range(len(bracket[next_key]))]
+                    # Check by looking at matches dict
+                    all_created = all(mid in matches for mid in next_match_ids)
+                    if not all_created:
+                        # Spawn them
+                        c.close()
+                        _spawn_tournament_round_matches(tid, mode, size, next_round)
+                        print(f"[tournament auto] {tid}: spawned round {next_round}")
+                else:
+                    # bracket exists but slots missing — defer to manual
+                    pass
+            else:
+                # No next round bracket yet — create it via existing spawn function
+                c.close()
+                _spawn_tournament_round_matches(tid, mode, size, next_round)
+                print(f"[tournament auto] {tid}: created + spawned round {next_round}")
+    except Exception as ex:
+        print(f"[tournament auto] error: {ex}")
+
+
+def _spawn_tournament_round_matches(tournament_id: str, mode: str, size: int, round_n: int) -> None:
+    """Create draft threads for round N of a tournament."""
+    import json as _json, secrets as _sec, threading as _th
+    from server.db import connect as _db
+    from server import arena_draft as _draft_mod
+    with _db_lock:
+        c = _db()
+        cur = c.cursor()
+        cur.execute("SELECT bracket, matches, mode, size FROM tournaments WHERE id=?",
+                    (tournament_id,))
+        t = cur.fetchone()
+        if t is None:
+            return
+        bracket = _json.loads(t["bracket"])
+        next_key = f"round{round_n}"
+        if next_key not in bracket or not bracket[next_key]:
+            return
+        mode_size = (1 if mode == "1v1" else (3 if mode == "3v3" else 5))
+        matches = _json.loads(t["matches"])
+        for b in bracket[next_key]:
+            if b["match_id"] in matches:
+                continue  # already spawned
+            # Find teams by winner name
+            w1, w2 = b["team1"], b["team2"]
+            cur.execute("SELECT team_id, captain_pid, players FROM tournament_teams "
+                        "WHERE tournament_id=? AND team_name=? LIMIT 1",
+                        (tournament_id, w1))
+            t1 = cur.fetchone()
+            cur.execute("SELECT team_id, captain_pid, players FROM tournament_teams "
+                        "WHERE tournament_id=? AND team_name=? LIMIT 1",
+                        (tournament_id, w2))
+            t2 = cur.fetchone()
+            if t1 is None or t2 is None:
+                continue
+            p1 = _json.loads(t1["players"]) or [t1["captain_pid"]]
+            p2 = _json.loads(t2["players"]) or [t2["captain_pid"]]
+            while len(p1) < mode_size:
+                p1.append("bot_" + _sec.token_hex(2))
+            while len(p2) < mode_size:
+                p2.append("bot_" + _sec.token_hex(2))
+            draft = _draft_mod.create_draft(p1[:mode_size], p2[:mode_size], mode=mode)
+            b["match_id"] = draft.match_id if hasattr(draft, "match_id") else "mtch_pending"
+            # Actually use draft_id as placeholder until match forms
+            matches[b["slot"]] = b["match_id"]
+            th = _th.Thread(target=_draft_tick_loop, args=(draft.draft_id,),
+                           daemon=True, name=f"tdraft-{draft.draft_id}")
+            th.start()
+        cur.execute("UPDATE tournaments SET bracket=?, matches=? WHERE id=?",
+                    (_json.dumps(bracket), _json.dumps(matches), tournament_id))
+        c.commit()
+
+
+
 def _advance_tournament_bracket(match_id: str, winner: str) -> None:
     """If match_id is part of a tournament, advance the bracket.
 

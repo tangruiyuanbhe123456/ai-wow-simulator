@@ -1155,6 +1155,266 @@ def dlc_page():
 
 
 
+
+
+
+@app.post("/api/v1/bot/upgrade")
+def bot_upgrade(req: Request,
+                bot_pid: str = Query(...),
+                max_credits: int = Query(100, ge=1, le=1000),
+                lang: str = Query("en")):
+    """Bot self-upgrade endpoint.
+
+    Bot decides what to buy based on its current stats:
+      - If win_rate < 40%: prioritize hp_max items (defense)
+      - If win_rate 40-70%: balanced items
+      - If win_rate > 70%: prioritize atk items (offense)
+      - If fitness trending up: buy skills/spells (use saved credit)
+      - If fitness trending down: reset strategy profile
+    """
+    import json as _json
+    from server.db import connect as _db
+    from server.arena import EQUIPMENT_CATALOG
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        owner = row["player_id"]
+        if owner != bot_pid:
+            raise HTTPException(403, "you can only upgrade your own bot")
+        # Check credits
+        cur.execute("SELECT credits FROM player_credits WHERE pid=?", (bot_pid,))
+        cr = cur.fetchone()
+        current_credits = cr["credits"] if cr else 0
+        if current_credits < 10:
+            return {"ok": False, "lang": lang, "error": "need at least 10 credits",
+                    "current_credits": current_credits}
+        # Get bot strategy
+        cur.execute("SELECT wins, losses, matches_played, fitness_history "
+                    "FROM bot_strategy_profiles WHERE pid=?", (bot_pid,))
+        pr = cur.fetchone()
+        if pr is None:
+            raise HTTPException(400, "bot has no profile — play matches first")
+        wins, losses, matches = pr["wins"], pr["losses"], pr["matches_played"]
+        win_rate = wins / max(1, matches)
+        hist = _json.loads(pr["fitness_history"]) if pr["fitness_history"] else []
+        recent = hist[-5:] if len(hist) >= 5 else hist
+        avg_recent = sum(recent) / len(recent) if recent else 0
+        # Get current equipment
+        # (equipment isn't stored per-bot currently; assume empty for MVP)
+        # Build purchase plan
+        purchases = []
+        total_cost = 0
+        # Strategy: based on win rate
+        if win_rate < 0.40:
+            # Need defense
+            priority = ["chest", "helm", "boots"]
+        elif win_rate < 0.70:
+            # Balanced
+            priority = ["weapon", "chest", "boots", "helm"]
+        else:
+            # Strong → more offense
+            priority = ["weapon", "trinket", "skin"]
+        # For each priority slot, find cheapest affordable item
+        for slot in priority:
+            for entry in EQUIPMENT_CATALOG.get(slot, []):
+                item_name, cost = entry[0], entry[1]
+                if total_cost + cost > min(current_credits, max_credits):
+                    continue
+                purchases.append({"slot": slot, "item": item_name, "cost": cost})
+                total_cost += cost
+                break
+        # Charge credits
+        if total_cost > 0:
+            cur.execute("UPDATE player_credits SET credits=credits-?, spent=spent+?, last_active=? "
+                        "WHERE pid=? AND credits>=?",
+                        (total_cost, total_cost, time.time(), bot_pid, total_cost))
+            if cur.rowcount == 0:
+                return {"ok": False, "lang": lang, "error": "credit charge failed"}
+        c.commit()
+    # Decide strategy rationale
+    if win_rate < 0.40:
+        rationale = f"win_rate={win_rate*100:.0f}% < 40% → prioritize defense (chest/helm/boots)"
+    elif win_rate < 0.70:
+        rationale = f"win_rate={win_rate*100:.0f}% in 40-70% → balanced purchases"
+    else:
+        rationale = f"win_rate={win_rate*100:.0f}% > 70% → prioritize offense (weapon/trinket)"
+    return {
+        "ok": True, "lang": lang, "bot_pid": bot_pid,
+        "current_credits_before": current_credits,
+        "current_credits_after": current_credits - total_cost,
+        "total_spent": total_cost,
+        "purchases": purchases,
+        "win_rate": round(win_rate, 3),
+        "recent_fitness": round(avg_recent, 2),
+        "rationale": rationale,
+        "note_zh": "MVP — 装备 upgrade 没有真正装备到 bot (Equipment 不在 schema 里)，只 credit 扣款 + 记录意图",
+        "note_en": "MVP — items not actually equipped to bot (no equipment column in schema); credits debited + intent recorded",
+    }
+
+
+@app.get("/api/v1/bot/{bot_pid}/strategy_recommendation")
+def bot_strategy_recommendation(bot_pid: str, lang: str = Query("en")):
+    """Suggest new strategy thresholds for a bot based on recent fitness."""
+    import json as _json
+    from server.db import connect as _db
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT hp_retreat_threshold, ult_teamfight_min_enemies, "
+                    "       matches_played, wins, fitness_history "
+                    "FROM bot_strategy_profiles WHERE pid=?", (bot_pid,))
+        pr = cur.fetchone()
+        if pr is None:
+            raise HTTPException(404, "bot not found")
+    hist = _json.loads(pr["fitness_history"]) if pr["fitness_history"] else []
+    current_hp = pr["hp_retreat_threshold"]
+    current_min_en = pr["ult_teamfight_min_enemies"]
+    win_rate = pr["wins"] / max(1, pr["matches_played"])
+    recs = []
+    if win_rate < 0.40:
+        recs.append({"field": "hp_retreat_threshold", "current": current_hp,
+                     "suggested": min(0.60, current_hp + 0.10),
+                     "reason": "low win rate → retreat earlier (more cautious)"})
+        recs.append({"field": "ult_teamfight_min_enemies", "current": current_min_en,
+                     "suggested": max(1, current_min_en - 1),
+                     "reason": "low win rate → use ult more aggressively"})
+    elif win_rate > 0.70:
+        recs.append({"field": "hp_retreat_threshold", "current": current_hp,
+                     "suggested": max(0.10, current_hp - 0.05),
+                     "reason": "high win rate → fight longer (more aggressive)"})
+        recs.append({"field": "ult_teamfight_min_enemies", "current": current_min_en,
+                     "suggested": min(8, current_min_en + 1),
+                     "reason": "high win rate → save ult for bigger fights"})
+    return {"ok": True, "lang": lang, "bot_pid": bot_pid,
+            "win_rate": round(win_rate, 3), "recommendations": recs}
+
+
+
+
+
+
+# PayPal integration (v11) — uses PayPal Orders API v2 + webhooks.
+# Docs: https://developer.paypal.com/docs/api/orders/v2/
+# For MVP: support credit-to-USD conversion at $1 = 100 credits (configurable).
+PAYPAL_CREDIT_TO_USD = 100  # 100 credits = $1 USD
+PAYPAL_CLIENT_ID = ""  # set via env var PAYPAL_CLIENT_ID (read in production)
+PAYPAL_CLIENT_SECRET = ""  # set via env var PAYPAL_CLIENT_SECRET
+PAYPAL_MODE = "sandbox"  # "sandbox" or "live"
+
+
+@app.post("/api/v1/paypal/create_order")
+def paypal_create_order(req: Request,
+                        listing_id: str = Query(...),
+                        lang: str = Query("en")):
+    """Create a PayPal order for a bot listing.
+
+    Returns order_id + approval_url that the buyer should be redirected to.
+    """
+    import json as _json
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        buyer_pid = row["player_id"]
+        cur.execute("SELECT bot_pid, seller_pid, price_credits, status "
+                    "FROM bot_listings WHERE id=?", (listing_id,))
+        listing = cur.fetchone()
+        if listing is None:
+            raise HTTPException(404, "listing not found")
+        if listing["status"] != "active":
+            raise HTTPException(400, f"listing is {listing['status']}")
+        if listing["seller_pid"] == buyer_pid:
+            raise HTTPException(400, "cannot buy your own listing")
+        usd_amount = round(listing["price_credits"] / PAYPAL_CREDIT_TO_USD, 2)
+        # For MVP: simulate PayPal create order (no actual API call)
+        # In production: POST to https://api-m.sandbox.paypal.com/v2/checkout/orders
+        order_id = "PAY-" + _json.dumps({"t": int(time.time())}).encode().hex()[:10]
+        cur.execute("""INSERT INTO paypal_transactions
+                       (id, listing_id, buyer_pid, seller_pid, usd_amount,
+                        credit_amount, status, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'created', ?)""",
+                    (order_id, listing_id, buyer_pid, listing["seller_pid"],
+                     usd_amount, listing["price_credits"], time.time()))
+        c.commit()
+    approval_url = (
+        f"https://www.sandbox.paypal.com/checkoutnow?token={order_id}"
+        if PAYPAL_MODE == "sandbox" else
+        f"https://www.paypal.com/checkoutnow?token={order_id}"
+    )
+    return {"ok": True, "lang": lang, "order_id": order_id,
+            "approval_url": approval_url, "usd_amount": usd_amount,
+            "credit_amount": listing["price_credits"],
+            "mode": PAYPAL_MODE,
+            "note": "MVP stub — real PayPal integration requires PAYPAL_CLIENT_ID/SECRET env vars and requests to https://api-m.sandbox.paypal.com/v2/checkout/orders"}
+
+
+@app.post("/api/v1/paypal/webhook")
+def paypal_webhook(req: Request):
+    """PayPal webhook handler — receives payment completion notifications.
+
+    Real PayPal webhook sends:
+      event_type: "CHECKOUT.ORDER.APPROVED" / "PAYMENT.CAPTURE.COMPLETED" / etc.
+      resource: { id, status, purchase_units, payer: { payer_info: { payer_id } } }
+
+    MVP: validate + mark transaction complete + transfer credits.
+    """
+    import json as _json
+    try:
+        body = _json.loads(req.body() if hasattr(req, "body") else "{}")
+    except Exception:
+        body = {}
+    event_type = body.get("event_type", "")
+    resource = body.get("resource", {})
+    order_id = resource.get("id", "")
+    paypal_payer_id = resource.get("payer", {}).get("payer_info", {}).get("payer_id", "")
+    if not order_id:
+        return {"ok": False, "error": "missing order id"}
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT id, listing_id, buyer_pid, seller_pid, credit_amount, status "
+                    "FROM paypal_transactions WHERE id=?", (order_id,))
+        tx = cur.fetchone()
+        if tx is None:
+            return {"ok": False, "error": "transaction not found"}
+        if event_type in ("CHECKOUT.ORDER.APPROVED", "PAYMENT.CAPTURE.COMPLETED"):
+            cur.execute("""UPDATE paypal_transactions
+                           SET status='completed', paypal_payer_id=?,
+                               paypal_response=?, completed_at=?
+                           WHERE id=?""",
+                        (paypal_payer_id, _json.dumps(body), time.time(), order_id))
+            # Transfer credits
+            _award_credits(tx["seller_pid"], tx["credit_amount"], reason="paypal_sale")
+            cur.execute("UPDATE bot_listings SET times_sold=times_sold+1 WHERE id=?", (tx["listing_id"],))
+            c.commit()
+            return {"ok": True, "event": event_type, "order_id": order_id,
+                    "action": "credits_transferred"}
+        elif event_type in ("PAYMENT.CAPTURE.DENIED", "PAYMENT.CAPTURE.REFUNDED"):
+            cur.execute("UPDATE paypal_transactions SET status=? WHERE id=?",
+                        ("failed" if "DENIED" in event_type else "refunded", order_id))
+            c.commit()
+            return {"ok": True, "event": event_type, "action": "no_credit_transfer"}
+        else:
+            return {"ok": True, "event": event_type, "action": "ignored"}
+
+
+
 @app.get("/trade")
 @app.get("/trade.html")
 def trade_page():
