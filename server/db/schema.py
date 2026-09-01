@@ -309,6 +309,24 @@ CREATE TABLE IF NOT EXISTS bot_purchases (
     FOREIGN KEY (bot_pid) REFERENCES players(id)
 );
 
+
+CREATE TABLE IF NOT EXISTS paypal_transactions (
+    id                  TEXT PRIMARY KEY,   -- PayPal transaction id (PayPal-generated or our order_id)
+    listing_id          TEXT,              -- FK to bot_listings
+    buyer_pid           TEXT,
+    seller_pid          TEXT,
+    usd_amount          REAL,              -- amount in USD
+    credit_amount       INTEGER,           -- credits delivered
+    status              TEXT DEFAULT 'created',  -- created | approved | completed | failed | refunded
+    paypal_payer_id     TEXT,
+    paypal_response     TEXT DEFAULT '{}',  -- raw PayPal API response JSON
+    created_at          REAL NOT NULL,
+    completed_at        REAL,
+    FOREIGN KEY (listing_id) REFERENCES bot_listings(id),
+    FOREIGN KEY (buyer_pid) REFERENCES players(id),
+    FOREIGN KEY (seller_pid) REFERENCES players(id)
+);
+
 """
 
 
