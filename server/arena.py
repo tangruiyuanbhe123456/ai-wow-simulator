@@ -860,8 +860,18 @@ def _update_fitness(m: ArenaMatch, blue_pids: list, red_pids: list) -> None:
             kills, deaths = agent.kills, agent.deaths
             if won:
                 fitness = 1.0 + min(kills, 5) * 0.1 - deaths * 0.1
+                # Award marketplace credits to the bot's owner (v10)
+                try:
+                    _award_match_credits(pid, won=True)
+                except Exception as e:
+                    print(f"[credits] award failed: {e}")
             else:
                 fitness = -0.5 + kills * 0.1 - deaths * 0.05
+                # Small consolation credit for participation
+                try:
+                    _award_match_credits(pid, won=False)
+                except Exception as e:
+                    print(f"[credits] award failed: {e}")
             # Read current row (or insert defaults)
             row = cur.execute(
                 "SELECT wins, losses, matches_played, fitness_history, "
