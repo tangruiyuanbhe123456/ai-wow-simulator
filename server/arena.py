@@ -93,6 +93,26 @@ EQUIPMENT_CATALOG = {
         ("war_paint",        200,  {"atk": 4, "hp_max": 20},         "berserk",     "+30% atk for 6 ticks (40 tick cd)"),
         ("ascended_form",    600,  {"atk": 18, "hp_max": 80},        "rebirth",     "30% chance to survive death at 1 HP (one-time)"),
     ],
+    # === DLC items (v10) ===
+    "weapon": [
+        ("necro_staff",      800,  {"atk": 22, "hp_max": 30},        "soul_drain",   "Kills heal 50% HP instantly (30 tick cd)"),
+        ("assassin_dagger",  900,  {"atk": 30},                     "backstab",     "Next 2 attacks deal 50% more damage (25 tick cd)"),
+    ],
+    "helm": [
+        ("druid_circlet",    700,  {"hp_max": 80, "atk": 8},        "regrowth",     "Heal 30 HP every 10 ticks passively (one-time setup)"),
+    ],
+    "chest": [
+        ("necro_robe",      1000,  {"hp_max": 220},                 "death_aura",   "Deal 5 dmg/sec to enemies within 3 cells (passive)"),
+    ],
+    "boots": [
+        ("wind_step",       1100,  {"atk": 12, "hp_max": 50},       "windwalk",     "After moving 5 ticks, +40% move speed (45 tick cd)"),
+    ],
+    "trinket": [
+        ("phoenix_eye_t3",  1500,  {"atk": 35, "hp_max": 120},      "rebirth_III",  "On death: 50% chance to survive at 1 HP (improved from ascended_form)"),
+    ],
+    "skin": [
+        ("shadow_cloak",     800,  {"atk": 25, "hp_max": 60},        "vanish",       "Every 60 ticks: become invisible for 3 ticks (next attack guaranteed crit)"),
+    ],
 }
 
 # Per-hero ultimates — each class gets 1 ultimate ability, 60-tick cooldown
@@ -100,10 +120,14 @@ EQUIPMENT_CATALOG = {
 # when they can).
 ULTIMATES = {
     # class -> (ult_id, zh_name, en_name, effect_func_name)
-    "warrior": ("warrior_charge",   "冲锋陷阵",  "Heroic Charge",   "Charge to nearest enemy (8 cells). Stun for 2 ticks."),
-    "mage":    ("mage_meteor",      "陨石天降",  "Meteor Strike",   "Deal 80 dmg in 5-cell radius at nearest enemy position."),
-    "priest":  ("priest_resurrect", "神圣复活",  "Divine Resurrection", "Revive any dead ally on the field (full HP, no respawn wait)."),
-    "hunter":  ("hunter_snipe",     "致命狙击",  "Hunter's Snipe",  "Snipe lowest-HP enemy from any distance for 70 dmg + 1.5x crit."),
+    "warrior":  ("warrior_charge",   "冲锋陷阵",  "Heroic Charge",   "Charge to nearest enemy (8 cells). Stun for 2 ticks."),
+    "mage":     ("mage_meteor",      "陨石天降",  "Meteor Strike",   "Deal 80 dmg in 5-cell radius at nearest enemy position."),
+    "priest":   ("priest_resurrect", "神圣复活",  "Divine Resurrection", "Revive any dead ally on the field (full HP, no respawn wait)."),
+    "hunter":   ("hunter_snipe",     "致命狙击",  "Hunter's Snipe",  "Snipe lowest-HP enemy from any distance for 70 dmg + 1.5x crit."),
+    # === DLC heroes (v10) ===
+    "necromancer": ("necro_summon",   "亡者大军",  "Legion of the Dead", "Summon 2 skeleton minions (40 HP each, AI: attack nearest enemy)."),
+    "assassin":    ("assassin_stealth","暗影突袭", "Shadow Strike",  "Teleport to enemy backline (12 cells), deal 100 dmg to lowest-HP target."),
+    "druid":       ("druid_root",     "自然之力",  "Nature's Grasp", "Root all enemies within 5 cells for 4 ticks (they cannot move)."),
 }
 
 # Gold rewards
@@ -1046,6 +1070,11 @@ EVENT_TYPES = [
     ("wild_buff",  "野区符", "Wild Buff",    10,  60,    {"dmg_pct": 0.10, "duration": 30}, "A jungle spirit blesses the first player who finds it (+10% dmg 30 ticks)"),
     ("trap",       "陷阱",  "Trap",          8,   80,    {"dmg": 60},     "Hidden spike trap! Deals 60 dmg to the first player to step on it."),
     ("merchant",   "商人",  "Merchant",      12,  150,   {"random_item": "shadow_fang"}, "A wandering merchant appears — sells shadow_fang for 150g"),
+    # === DLC events (v10) ===
+    ("boss_raid",  "Boss 战", "Boss Raid",   8,   0,     {"boss_hp": 500, "boss_dmg": 30, "reward_per_hit": 5},
+     "A world boss spawns in the river — both teams race to deal damage. Last hit gets +200g + dragon buff."),
+    ("portal",     "传送门", "Portal",      6,   0,     {"teleport_to": "center"},
+     "A glowing portal appears — stepping on it teleports you to the enemy base for 3 ticks."),
 ]
 
 
