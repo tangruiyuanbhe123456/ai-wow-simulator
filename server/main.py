@@ -867,6 +867,294 @@ def marketplace_delist(req: Request, listing_id: str, lang: str = Query("en")):
 
 
 
+
+
+
+@app.get("/api/v1/marketplace/profitability/{pid}")
+def marketplace_profitability(pid: str, lang: str = Query("en")):
+    """Profitability report for a bot.
+
+    Returns:
+      - lifetime_credits: total credits earned from match wins
+      - lifetime_spent: total credits spent (listings, purchases)
+      - current_balance: player_credits.credits
+      - matches_played, wins, losses, win_rate
+      - marketplace_sales: total credits earned from selling bots
+      - marketplace_purchases: credits spent buying other bots
+      - active_listings: how many currently listed
+      - best_sale_price: highest single-sale price ever
+      - roi: credits_earned_per_match (efficiency)
+    """
+    from server.db import connect as _db
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        # Credits
+        cur.execute("SELECT credits, earned, spent FROM player_credits WHERE pid=?", (pid,))
+        cr = cur.fetchone()
+        credits = cr["credits"] if cr else 0
+        earned = cr["earned"] if cr else 0
+        spent = cr["spent"] if cr else 0
+        # Matches
+        cur.execute("SELECT wins, losses, matches_played, fitness_history "
+                    "FROM bot_strategy_profiles WHERE pid=?", (pid,))
+        pr = cur.fetchone()
+        wins = pr["wins"] if pr else 0
+        losses = pr["losses"] if pr else 0
+        matches = pr["matches_played"] if pr else 0
+        win_rate = round(wins / max(1, matches), 3)
+        # Marketplace sales (as seller)
+        cur.execute("SELECT COUNT(*) AS n, COALESCE(SUM(price_credits), 0) AS total, "
+                    "       COALESCE(MAX(price_credits), 0) AS max_price "
+                    "FROM bot_purchases WHERE seller_pid=?", (pid,))
+        sr = cur.fetchone()
+        # Marketplace purchases (as buyer)
+        cur.execute("SELECT COUNT(*) AS n, COALESCE(SUM(price_credits), 0) AS total "
+                    "FROM bot_purchases WHERE buyer_pid=?", (pid,))
+        br = cur.fetchone()
+        # Active listings
+        cur.execute("SELECT COUNT(*) AS n FROM bot_listings WHERE bot_pid=? AND status='active'", (pid,))
+        ar = cur.fetchone()
+    import json as _json
+    fitness_history = _json.loads(pr["fitness_history"]) if pr and pr["fitness_history"] else []
+    roi = round((earned - spent) / max(1, matches), 3) if matches else 0
+    return {
+        "ok": True, "lang": lang, "pid": pid,
+        "current_balance": credits,
+        "lifetime_credits_earned": earned,
+        "lifetime_credits_spent": spent,
+        "matches_played": matches,
+        "wins": wins, "losses": losses, "win_rate": win_rate,
+        "fitness_history_size": len(fitness_history),
+        "last_fitness": round(fitness_history[-1], 2) if fitness_history else 0,
+        "avg_fitness": round(sum(fitness_history) / len(fitness_history), 2) if fitness_history else 0,
+        "marketplace_sales_count": sr["n"],
+        "marketplace_sales_total_credits": sr["total"],
+        "best_sale_price_credits": sr["max_price"],
+        "marketplace_purchases_count": br["n"],
+        "marketplace_purchases_total_credits": br["total"],
+        "active_listings": ar["n"],
+        "roi_per_match": roi,
+    }
+
+
+
+
+
+
+@app.get("/api/v1/marketplace/auto_price/{pid}")
+def marketplace_auto_price(pid: str, lang: str = Query("en")):
+    """Suggest a price (in credits) for a bot based on its fitness history.
+
+    Pricing formula:
+      base = 5 credits (minimum)
+      fitness_bonus = max(0, avg_fitness) * 8
+      win_rate_bonus = win_rate * 25
+      experience_bonus = min(matches_played / 10, 5)
+      recent_trend_bonus = (last_fitness - avg_fitness) * 10
+
+      suggested_price = base + fitness_bonus + win_rate_bonus + experience_bonus + recent_trend_bonus
+      clamp to [5, 200] credits
+    """
+    import json as _json
+    from server.db import connect as _db
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT wins, losses, matches_played, fitness_history "
+                    "FROM bot_strategy_profiles WHERE pid=?", (pid,))
+        pr = cur.fetchone()
+        if pr is None:
+            raise HTTPException(404, "bot has no training profile — must play matches first")
+    hist = _json.loads(pr["fitness_history"]) if pr["fitness_history"] else []
+    wins = pr["wins"]; losses = pr["losses"]; matches = pr["matches_played"]
+    avg_fit = sum(hist) / len(hist) if hist else 0
+    last_fit = hist[-1] if hist else 0
+    win_rate = wins / max(1, matches)
+    base = 5
+    fitness_bonus = max(0, avg_fit) * 8
+    wr_bonus = win_rate * 25
+    exp_bonus = min(matches / 10, 5)
+    trend_bonus = (last_fit - avg_fit) * 10
+    suggested = base + fitness_bonus + wr_bonus + exp_bonus + trend_bonus
+    suggested = max(5, min(200, round(suggested)))
+    return {
+        "ok": True, "lang": lang, "pid": pid,
+        "suggested_price_credits": suggested,
+        "breakdown": {
+            "base": base, "fitness_bonus": round(fitness_bonus, 1),
+            "win_rate_bonus": round(wr_bonus, 1), "experience_bonus": round(exp_bonus, 1),
+            "trend_bonus": round(trend_bonus, 1),
+        },
+        "bot_stats": {"wins": wins, "losses": losses, "matches": matches,
+                      "win_rate": round(win_rate, 3), "avg_fitness": round(avg_fit, 2),
+                      "last_fitness": round(last_fit, 2)},
+    }
+
+
+@app.post("/api/v1/marketplace/auto_list")
+def marketplace_auto_list(req: Request,
+                         bot_pid: str = Query(...),
+                         force: bool = Query(False),  # re-list even if already listed
+                         lang: str = Query("en")):
+    """AI agent auto-list: prices the bot based on its fitness, then lists.
+
+    Returns the suggested price + listing id (if successful).
+    """
+    import secrets as _sec
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        seller_pid = row["player_id"]
+        if bot_pid != seller_pid:
+            raise HTTPException(403, "you can only list your own bot")
+        # Get suggested price from same logic
+        cur.execute("SELECT wins, losses, matches_played, fitness_history "
+                    "FROM bot_strategy_profiles WHERE pid=?", (bot_pid,))
+        pr = cur.fetchone()
+        if pr is None:
+            raise HTTPException(400, "bot has no training profile — must play matches first")
+        import json as _json
+        hist = _json.loads(pr["fitness_history"]) if pr["fitness_history"] else []
+        matches = pr["matches_played"]; wins = pr["wins"]
+        avg_fit = sum(hist) / len(hist) if hist else 0
+        last_fit = hist[-1] if hist else 0
+        win_rate = wins / max(1, matches)
+        base = 5
+        fitness_bonus = max(0, avg_fit) * 8
+        wr_bonus = win_rate * 25
+        exp_bonus = min(matches / 10, 5)
+        trend_bonus = (last_fit - avg_fit) * 10
+        price = max(5, min(200, round(base + fitness_bonus + wr_bonus + exp_bonus + trend_bonus)))
+        # Check if already listed
+        cur.execute("SELECT id, price_credits FROM bot_listings WHERE bot_pid=? AND status='active'",
+                    (bot_pid,))
+        existing = cur.fetchone()
+        if existing and not force:
+            return {"ok": True, "lang": lang, "bot_pid": bot_pid,
+                    "listing_id": existing["id"],
+                    "suggested_price_credits": existing["price_credits"],
+                    "status": "already_listed",
+                    "message": "bot already has an active listing; pass force=true to replace"}
+        # Remove existing listings (force=true case)
+        if existing and force:
+            cur.execute("UPDATE bot_listings SET status='removed' WHERE id=?", (existing["id"],))
+        listing_id = "lst_" + _sec.token_hex(4)
+        title = f"Bot {bot_pid[-8:]} (auto-priced {price}💰)"
+        cur.execute("""INSERT INTO bot_listings
+                       (id, seller_pid, bot_pid, title, description, price_credits, status, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'active', ?)""",
+                    (listing_id, seller_pid, bot_pid, title,
+                     f"AI auto-priced based on W{wins} L{losses} avg_fit {avg_fit:.2f}",
+                     price, time.time()))
+        c.commit()
+    return {"ok": True, "lang": lang, "bot_pid": bot_pid, "listing_id": listing_id,
+            "suggested_price_credits": price, "title": title, "status": "listed"}
+
+
+@app.post("/api/v1/marketplace/auto_reprice/{listing_id}")
+def marketplace_auto_reprice(req: Request, listing_id: str, lang: str = Query("en")):
+    """Re-price an existing listing using auto_price formula.
+
+    Use this when your bot's fitness has changed significantly (e.g. after
+    training new matches).
+    """
+    from server.db import connect as _db
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing Bearer token")
+    token = auth[7:]
+    with _db_lock:
+        c = db()
+        cur = c.cursor()
+        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(401, "invalid token")
+        pid = row["player_id"]
+        cur.execute("SELECT bot_pid, seller_pid, status FROM bot_listings WHERE id=?", (listing_id,))
+        listing = cur.fetchone()
+        if listing is None:
+            raise HTTPException(404, "listing not found")
+        if listing["seller_pid"] != pid:
+            raise HTTPException(403, "only seller can reprice")
+        if listing["status"] != "active":
+            raise HTTPException(400, f"listing is {listing['status']}, cannot reprice")
+        # Re-fetch fitness + recompute price (inline)
+        cur.execute("SELECT wins, losses, matches_played, fitness_history "
+                    "FROM bot_strategy_profiles WHERE pid=?", (listing["bot_pid"],))
+        pr = cur.fetchone()
+        if pr is None:
+            raise HTTPException(400, "bot has no profile")
+        import json as _json
+        hist = _json.loads(pr["fitness_history"]) if pr["fitness_history"] else []
+        matches = pr["matches_played"]; wins = pr["wins"]
+        avg_fit = sum(hist) / len(hist) if hist else 0
+        last_fit = hist[-1] if hist else 0
+        win_rate = wins / max(1, matches)
+        fitness_bonus = max(0, avg_fit) * 8
+        wr_bonus = win_rate * 25
+        exp_bonus = min(matches / 10, 5)
+        trend_bonus = (last_fit - avg_fit) * 10
+        new_price = max(5, min(200, round(5 + fitness_bonus + wr_bonus + exp_bonus + trend_bonus)))
+        cur.execute("UPDATE bot_listings SET price_credits=? WHERE id=?", (new_price, listing_id))
+        c.commit()
+    return {"ok": True, "lang": lang, "listing_id": listing_id, "new_price_credits": new_price}
+
+
+
+
+
+
+@app.get("/api/v1/dlc/info")
+def dlc_info(lang: str = Query("en")):
+    """List all DLC content available in v10."""
+    return {
+        "ok": True, "lang": lang, "version": "v10",
+        "heroes": [
+            {"id": "necromancer_lich", "name_zh": "死灵·巫妖", "name_en": "Necromancer (Lich)",
+             "ult": "necro_summon — 召唤 2 个骷髅 (40 HP, 自动战斗)"},
+            {"id": "assassin_blade", "name_zh": "刺客·影刃", "name_en": "Assassin (Blade)",
+             "ult": "assassin_stealth — 闪现到 12 cells 内 + 100 dmg"},
+            {"id": "druid_ancient", "name_zh": "德鲁伊·古树", "name_en": "Druid (Ancient)",
+             "ult": "druid_root — 5 cells 内敌人定身 4 ticks"},
+        ],
+        "items": [
+            {"id": "necro_staff", "slot": "weapon", "cost": 800, "active": "soul_drain — 击杀回 50% HP"},
+            {"id": "assassin_dagger", "slot": "weapon", "cost": 900, "active": "backstab — 下 2 攻 +50% dmg"},
+            {"id": "druid_circlet", "slot": "helm", "cost": 700, "active": "regrowth — 每 10 tick 自动 heal 30"},
+            {"id": "necro_robe", "slot": "chest", "cost": 1000, "active": "death_aura — 3 cells 内敌人每秒 -5 HP"},
+            {"id": "wind_step", "slot": "boots", "cost": 1100, "active": "windwalk — 移动 5 tick 后 +40% 速度"},
+            {"id": "phoenix_eye_t3", "slot": "trinket", "cost": 1500, "active": "rebirth_III — 死亡 50% 概率 1 HP"},
+            {"id": "shadow_cloak", "slot": "skin", "cost": 800, "active": "vanish — 每 60 tick 隐身 3 tick + 必暴"},
+        ],
+        "events": [
+            {"id": "boss_raid", "name_zh": "Boss 战", "name_en": "Boss Raid",
+             "desc": "河道刷世界 boss (500 HP)，双方抢伤害，最后一击 +200g + dragon buff"},
+            {"id": "portal", "name_zh": "传送门", "name_en": "Portal",
+             "desc": "踩上传送门瞬移到敌方基地 3 ticks"},
+        ],
+        "hero_pool_total": 15,  # 12 base + 3 DLC
+    }
+
+
+@app.get("/dlc")
+@app.get("/dlc.html")
+def dlc_page():
+    """DLC info page (v10) — lists all new heroes/items/events."""
+    return FileResponse(str(WEB_DIR / "dlc.html"))
+
+
+
 @app.get("/trade")
 @app.get("/trade.html")
 def trade_page():
