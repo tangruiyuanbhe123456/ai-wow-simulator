@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>DLC 扩展包 / Expansion Pack (v10)</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.d-container { max-width: 1300px; margin: 0 auto; }
+.d-header { padding: 12px; background: #1a2030; border: 1px solid #ff5f5f; margin-bottom: 16px; }
+.d-section { padding: 12px; background: #0a0e14; margin-bottom: 12px; border: 1px solid #333; }
+.d-section h2 { color: #ffcc00; margin-bottom: 8px; }
+.d-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.d-card { padding: 10px; background: #050810; border: 1px solid #444; }
+.d-card h3 { color: #5fb3d4; font-size: 14px; margin-bottom: 4px; }
+.d-card .name-en { color: #888; font-size: 11px; }
+.d-card .ult { color: #ffd700; font-size: 12px; margin-top: 6px; padding: 4px; background: #1a2030; }
+.d-card .cost { color: #88ff88; font-weight: bold; }
+.d-card .active { color: #5fafff; font-size: 11px; margin-top: 4px; padding: 3px; background: #1a2030; }
+.summary-box { padding: 16px; background: #1a2030; border: 2px solid #ffcc00; margin-bottom: 16px; text-align: center; }
+.summary-box h1 { color: #ffcc00; }
+</style>
+</head>
+<body>
+<div class="d-container">
+<header>
+  <h1>🎮 DLC 扩展包 / Expansion Pack (v10)</h1>
+  <div id="controls">
+    <a href="/" style="color:#5fb3d4">← Main</a>
+    <a href="/marketplace.html" style="color:#5fafff">/marketplace</a>
+    <a href="/lobby.html" style="color:#5fafff">/lobby</a>
+    <span id="status">loading...</span>
+  </div>
+</header>
+
+<div class="summary-box">
+  <h1>🎁 v10 扩展包 / Expansion Pack</h1>
+  <p style="font-size:14px;color:#888">新增 3 英雄 + 7 装备 + 2 事件</p>
+  <p>3 new heroes + 7 items + 2 events added</p>
+</div>
+
+<h2 style="color:#ffcc00">⚔️ 新英雄 / New Heroes (3)</h2>
+<div id="heroes" class="d-grid"></div>
+
+<h2 style="color:#ffcc00;margin-top:16px">🛡️ 新装备 / New Items (7)</h2>
+<div id="items" class="d-grid"></div>
+
+<h2 style="color:#ffcc00;margin-top:16px">🎲 新事件 / New Events (2)</h2>
+<div id="events" class="d-grid"></div>
+
+<footer>
+  <p style="text-align:center;color:#666;font-size:11px;margin-top:24px">
+    现有 hero pool 共 15 个 (12 base + 3 DLC) / Total 15 heroes (12 base + 3 DLC)
+  </p>
+</footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+function setStatus(m) { $('status').textContent = m; }
+
+(async function init() {
+  try {
+    const r = await fetch('/api/v1/dlc/info');
+    const d = await r.json();
+    if (!d.ok) { setStatus('ERR ' + (d.detail || 'load failed')); return; }
+    setStatus('OK v' + d.version + ' - ' + d.heroes.length + ' heroes, ' + d.items.length + ' items, ' + d.events.length + ' events');
+
+    // Heroes
+    let hhtml = '';
+    d.heroes.forEach(h => {
+      hhtml += `<div class="d-card">
+        <h3>⚔️ ${escapeHtml(h.name_zh)}</h3>
+        <div class="name-en">${escapeHtml(h.name_en)}</div>
+        <div class="ult">${escapeHtml(h.ult)}</div>
+      </div>`;
+    });
+    $('heroes').innerHTML = hhtml;
+
+    // Items
+    let ihtml = '';
+    d.items.forEach(i => {
+      ihtml += `<div class="d-card">
+        <h3>🛡️ ${escapeHtml(i.id)} <span style="color:#88ff88;font-size:13px">${i.cost}💰</span></h3>
+        <div style="color:#888;font-size:11px">slot: ${i.slot}</div>
+        <div class="active">⚡ ${escapeHtml(i.active)}</div>
+      </div>`;
+    });
+    $('items').innerHTML = ihtml;
+
+    // Events
+    let ehtml = '';
+    d.events.forEach(e => {
+      ehtml += `<div class="d-card">
+        <h3>🎲 ${escapeHtml(e.name_zh)}</h3>
+        <div class="name-en">${escapeHtml(e.name_en)}</div>
+        <div style="margin-top:6px;font-size:12px;color:#ccc">${escapeHtml(e.desc)}</div>
+      </div>`;
+    });
+    $('events').innerHTML = ehtml;
+  } catch (e) { setStatus('ERR ' + e.message); }
+})();
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[<>&"']/g, c => ({'<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+</script>
+</body>
+</html>
