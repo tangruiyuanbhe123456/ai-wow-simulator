@@ -84,3 +84,55 @@ Run `make test` or `start.bat test` to execute the full 9-point check:
 7. ✅ SDK 3-line example
 8. ✅ `start.bat` + `Makefile` both work
 9. ✅ No `TODO` / `FIXME` / `NotImplementedError`
+
+## Version History
+
+- **v3** — base world, 4 classes, 2 dungeons, guilds, quests, gather
+- **v4** — ban/pick draft, summoner spells, equipment trade, 5v5 replay, leaderboard
+- **v5** — match rooms (1v1 / 3v3 / 5v5 + lobby + auto-start draft)
+- **v6** — bot strategy layer (5-rule decision tree)
+- **v7** — AI training center (fitness + strategy evolution) + equipment depth
+- **v8** — human-vs-bot mode + tournament system + equipment trade UI
+- **v9** — self-play training + tournament advancement + set bonuses + RTMP streaming
+- **v9.5** — bot marketplace (credits + buy/sell + strategy snapshot)
+- **v10** — DLC expansion (3 heroes + 7 items + 2 events) + AI auto-pricing
+- **v11** — bot self-upgrade endpoint + tournament auto-trigger + PayPal integration
+- **v12** — **bot skill tree** (3 evolution branches + AI auto-evolve) + DB lock resilience
+
+## v12 — Bot Skill Tree
+
+Each bot picks one of 3 evolution branches and levels up via match play:
+
+| Branch | Tagline | Best for |
+|---|---|---|
+| `tank` (Guardian) | HP max 5→25%, shield, self-heal | win-rate < 40% |
+| `berserk` | ATK +5→25%, crit, lifesteal, ult CD -10t | moderate WR with high K/D |
+| `strategist` | ult CD -3→-15t, spell slot, vision, double-ult | win-rate > 60% |
+
+Each match awards **+20 skill_points on win, +8 on loss**. Levels 1..5 cost
+`(level * 30)` points. Switching branches costs 50 points. The AI suggestion
+in `GET /skill-tree/suggest` is based on the bot's recent win rate + fitness
+trend; `POST /skill-tree/auto-evolve` accepts it idempotently.
+
+API (under `/api/v1/bot/{pid}/skill-tree`):
+
+```
+GET  /skill-tree             full state + AI suggestion + evolution log
+GET  /skill-tree/suggest     heuristic suggestion (no side effects)
+POST /skill-tree/choose      pick or switch (force=true bypasses cost)
+POST /skill-tree/auto-evolve AI auto-picks if no branch yet
+```
+
+UI: `web/skill_tree.html` (basic page shell; full interactive JS to follow).
+
+### DB lock resilience (bundled with v12)
+
+- `server/db/store.py` — `PRAGMA busy_timeout=5000` + `synchronous=NORMAL`
+- `server/main.py` — per-thread `_local.conn` cache + tick loop on its own conn
+- `server/main.py` — `_retry_locked_db_write` helper wraps `room_create`
+- `server/arena.py` — `_safe_db_write` retry wrapper around credits/fitness/rank
+- `scripts/train_bots.py` — HTTP retry on 5xx
+
+Verified: 5 rounds of `train_bots` produce 0 `AttributeError` and 0
+`"database is locked"` in `logs/server.log`.
+
