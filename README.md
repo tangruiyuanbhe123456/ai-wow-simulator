@@ -125,6 +125,40 @@ POST /skill-tree/auto-evolve AI auto-picks if no branch yet
 
 UI: `web/skill_tree.html` (basic page shell; full interactive JS to follow).
 
+### Quick Start: see AI auto-evolve in 90 seconds
+
+```bash
+# Terminal 1: server (already running on 127.0.0.1:8787)
+python -m server.main
+
+# Terminal 2: end-to-end demo
+python scripts/demo_v12.py
+```
+
+Output (verified):
+
+```
+[4] AI Auto-Evolve
+    BotA (e53bc948):
+      -> branch: strategist
+      reason_zh: 胜率 100% 高,建议谋士系强化技能节奏
+      reason_en: Win rate 100% is high -- Strategist doubles down on utility
+    BotB (7c292117):
+      -> branch: tank
+      reason_zh: 胜率 0% 偏低,建议转向守护系抗压
+      reason_en: Win rate 0% is low -- Guardian path helps survive
+
+[5] Verify Branch Picks
+    BotA: got='strategist' expected='strategist' OK
+    BotB: got='tank' expected='tank' OK
+```
+
+For a real fight (auto-evolve runs after every round):
+
+```bash
+python scripts/train_bots.py --rounds 5 --interval 2
+```
+
 ### DB lock resilience (bundled with v12)
 
 - `server/db/store.py` — `PRAGMA busy_timeout=5000` + `synchronous=NORMAL`
