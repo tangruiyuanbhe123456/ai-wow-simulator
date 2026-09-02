@@ -220,6 +220,27 @@ def main():
         else:
             print(f"  ✗ match timed out")
 
+        # v12: trigger AI auto-evolve for each bot that has no branch yet.
+        # Best-effort: this is what makes the skill tree actually fill up
+        # during a training run instead of staying at branch=NULL forever.
+        # Note: auto-evolve only acts when matches >= SUGGEST_WINDOW (3), so
+        # in practice the first round of training is silent; branches appear
+        # in round 2+ once the heuristic has data to work with.
+        print(f"  triggering auto-evolve for bots with no branch...")
+        for bot in bots:
+            try:
+                s, r = call(f"/api/v1/bot/{bot['pid']}/skill-tree/auto-evolve",
+                            method="POST")
+                if s == 200 and r.get("changed"):
+                    print(f"    \u2713 {bot['pid'][-8:]} -> {r['branch_picked']} "
+                          f"({r['reason_en'][:60]})")
+                elif s == 200 and not r.get("changed"):
+                    pass  # either already has branch or not enough matches
+                else:
+                    print(f"    \u2717 {bot['pid'][-8:]} auto-evolve failed: {r}")
+            except Exception as e:
+                print(f"    \u2717 {bot['pid'][-8:]} auto-evolve error: {e}")
+
         # Show leaderboard so far
         lb = read_training_leaderboard()
         if lb:

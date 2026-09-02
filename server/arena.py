@@ -241,6 +241,13 @@ class ArenaAgent:
     # Ultimate skill (per-hero) — loaded from ULTIMATES at match start.
     ultimate: str = ""        # ultimate_id, e.g. "warrior_charge"
     ult_cd: int = 0          # ticks until ready (0 = ready)
+    # v12: skill-tree branch + level + currently-active perks (loaded from
+    # bot_skill_tree at match start; perks are applied via _recompute_agent_stats).
+    branch: str = ""          # 'tank' | 'berserk' | 'strategist' | ''
+    branch_level: int = 0     # 0..5
+    skill_effects: dict = field(default_factory=dict)
+    # Effective ult CD modifier from perks (e.g. strategist L5 = -15).
+    # Applied as (a.ult_cd - a.ult_cd_offset); clamped at recompute time.
     # Summoner spell (chosen during draft)
     spell: str = ""          # spell_id, e.g. "flash"
     spell_used: bool = False  # one-shot per match
@@ -368,7 +375,7 @@ class ArenaMatch:
 
 
 def _recompute_agent_stats(a: ArenaAgent) -> None:
-    """Recompute a's atk and hp_max from base + equipment + buffs."""
+    """Recompute a's atk and hp_max from base + equipment + v12 perks."""
     base_atk = 14
     base_hp_max = 100
     bonus_atk = 0
@@ -383,11 +390,21 @@ def _recompute_agent_stats(a: ArenaAgent) -> None:
                 bonus_atk += stats.get("atk", 0)
                 bonus_hp += stats.get("hp_max", 0)
                 break
+    # v12: skill-tree perk multipliers (tank hp_max%, berserk atk%, etc.).
+    # Branch is loaded by _load_skill_tree() before this recompute fires.
+    perks = getattr(a, "skill_effects", {}) or {}
+    hp_max_pct = perks.get("hp_max_pct", 0) or 0
+    atk_pct = perks.get("atk_pct", 0) or 0
+    armor_flat = perks.get("armor", 0) or 0  # tank L4: +5 armor = +5 hp
     # New max — preserve current HP ratio so the agent doesn't get a free heal
     ratio = (a.hp / a.hp_max) if a.hp_max else 1.0
-    a.hp_max = base_hp_max + bonus_hp
+    base_total_hp = base_hp_max + bonus_hp
+    a.hp_max = int(base_total_hp * (1 + hp_max_pct / 100.0)) + armor_flat
     a.hp = max(1, int(a.hp_max * ratio))
-    a.atk = base_atk + bonus_atk
+    a.atk = int((base_atk + bonus_atk) * (1 + atk_pct / 100.0))
+    # Cache the effective ult-cd offset so callers can apply it on top of
+    # the per-ult cooldown without double-counting if recompute fires twice.
+    a.ult_cd_offset = perks.get("ult_cd_minus", 0) or 0
 
 
 def _try_buy_best_affordable(a: ArenaAgent, m: ArenaMatch) -> bool:
@@ -456,7 +473,7 @@ def _use_ultimate(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> None:
             m.team_kills[a.team] += 1
             a.gold += GOLD_PER_KILL
             _try_buy_best_affordable(a, m)
-        a.ult_cd = 60
+        a.ult_cd = 60 + getattr(a, "ult_cd_offset", 0)
     elif ult_id == "mage_meteor":
         enemies = [e for e in (m.blue + m.red) if e.alive and e.team != a.team]
         if not enemies:
@@ -474,7 +491,7 @@ def _use_ultimate(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> None:
             f"⚡ {a.name} ({a.team}) 大招 陨石天降! 命中 {len(hit)} 人 各 80 伤害 (cd=60) | ⚡ {a.name} ({a.team}) ULT Meteor Strike! Hits {len(hit)} enemies for 80 each (cd=60)",
             f"⚡ {a.name} ({a.team}) ULT Meteor Strike! Hits {len(hit)} enemies for 80 each (cd=60)",
         )
-        a.ult_cd = 60
+        a.ult_cd = 60 + getattr(a, "ult_cd_offset", 0)
     elif ult_id == "priest_resurrect":
         # Revive any dead ally on the field
         allies = [x for x in (m.blue if a.team == "blue" else m.red) if not x.alive]
@@ -488,7 +505,7 @@ def _use_ultimate(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> None:
             f"⚡ {a.name} ({a.team}) 大招 神圣复活! {ally.name} ({ally.team}) 满血复活 (cd=60) | ⚡ {a.name} ({a.team}) ULT Divine Resurrection! {ally.name} ({ally.team}) back at full HP (cd=60)",
             f"⚡ {a.name} ({a.team}) ULT Divine Resurrection! {ally.name} ({ally.team}) back at full HP (cd=60)",
         )
-        a.ult_cd = 60
+        a.ult_cd = 60 + getattr(a, "ult_cd_offset", 0)
     elif ult_id == "hunter_snipe":
         # Snipe lowest-HP enemy from any distance
         enemies = [e for e in (m.blue + m.red) if e.alive and e.team != a.team]
@@ -511,7 +528,7 @@ def _use_ultimate(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> None:
             m.team_kills[a.team] += 1
             a.gold += GOLD_PER_KILL
             _try_buy_best_affordable(a, m)
-        a.ult_cd = 60
+        a.ult_cd = 60 + getattr(a, "ult_cd_offset", 0)
 
 
 
@@ -774,6 +791,8 @@ def form_match_from_draft(draft_id: str, lookup_agent) -> ArenaMatch | None:
 
     # Load bot strategy profiles from DB (if any)
     _load_strategy_profiles(blue + red)
+    # v12: Load bot skill-tree branch/level/perks for perks to actually take effect
+    _load_skill_tree(blue + red)
 
     # Auto-assign lanes by roster index: 0→top, 1→mid, 2→bot, 3→top, 4→mid
     for i, a in enumerate(blue):
@@ -1117,9 +1136,9 @@ def _load_strategy_profiles(agents: list) -> None:
     populate the agent's strategy fields (as instance attrs).
     Players without a profile keep defaults.
     """
-    import sqlite3
-    try:
-        c = sqlite3.connect(str(DB_PATH))
+    from server.db import connect as _db_connect
+    def _do():
+        c = _db_connect()
         cur = c.cursor()
         for a in agents:
             row = cur.execute(
@@ -1132,9 +1151,46 @@ def _load_strategy_profiles(agents: list) -> None:
                  a.teamfight_min_enemies, a.ult_teamfight_min_allies,
                  a.ult_teamfight_min_enemies, a.ult_threshold) = row
         c.close()
+    try:
+        _safe_db_write(_do)
     except Exception as e:
         print(f"[strategy profile] load failed: {e}")
 
+
+def _load_skill_tree(agents: list) -> None:
+    """v12: Load each agent's skill-tree branch + level + active perks.
+    Best-effort: missing rows keep defaults (branch='', branch_level=0).
+    Uses the connect() helper so PRAGMAs (busy_timeout, WAL) apply.
+    """
+    from server.db import connect as _db_connect
+    from server.evolution import BRANCH_PERKS
+
+    def _do():
+        c = _db_connect()
+        cur = c.cursor()
+        for a in agents:
+            row = cur.execute(
+                "SELECT branch, branch_level FROM bot_skill_tree WHERE pid=?",
+                (a.pid,)).fetchone()
+            if not row or not row["branch"]:
+                continue
+            a.branch = row["branch"]
+            a.branch_level = min(5, max(0, row["branch_level"] or 0))
+            # Aggregate perks across all levels <= branch_level
+            perks = {}
+            for lvl in range(1, a.branch_level + 1):
+                perks_lvl = BRANCH_PERKS.get(a.branch, {}).get(lvl, {})
+                for k, v in perks_lvl.items():
+                    if k.startswith("desc_"):
+                        continue  # skip human-readable labels
+                    perks[k] = v
+            a.skill_effects = perks
+        c.close()
+
+    try:
+        _safe_db_write(_do)
+    except Exception as e:
+        print(f"[skill tree] load failed: {e}")
 
 
 
