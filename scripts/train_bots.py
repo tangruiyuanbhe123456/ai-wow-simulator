@@ -30,21 +30,36 @@ BASE = "http://127.0.0.1:8787"
 DB_PATH = "D:/Projects/ai-wow-simulator/data/world.db"
 
 
-def call(path, method="GET", token=None, body=None, params=None):
-    full = BASE + path
-    if params:
-        from urllib.parse import urlencode
-        full += ("?" if "?" not in full else "&") + urlencode(params)
-    data_bytes = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(full, method=method, data=data_bytes)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return r.status, json.loads(r.read().decode())
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read().decode())
+def call(path, method="GET", token=None, body=None, params=None, retries=3):
+    """HTTP call with retry on 5xx."""
+    import time as _t
+    for attempt in range(retries):
+        try:
+            full = BASE + path
+            if params:
+                from urllib.parse import urlencode
+                full += ("?" if "?" not in full else "&") + urlencode(params)
+            data_bytes = json.dumps(body).encode() if body is not None else None
+            req = urllib.request.Request(full, method=method, data=data_bytes)
+            req.add_header("Content-Type", "application/json")
+            if token:
+                req.add_header("Authorization", f"Bearer {token}")
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code >= 500 and attempt < retries - 1:
+                _t.sleep(2 + attempt * 2)
+                continue
+            try:
+                return e.code, json.loads(e.read().decode())
+            except Exception:
+                return e.code, {}
+        except Exception:
+            if attempt < retries - 1:
+                _t.sleep(2 + attempt * 2)
+                continue
+            return 0, {}
+    return 0, {}
 
 
 def register_bot(cls):
@@ -87,7 +102,9 @@ def wait_for_match_to_end(match_id, timeout=180):
 def read_training_leaderboard():
     """Read bot fitness stats from DB."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10.0)
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA journal_mode=WAL")
         cur = conn.cursor()
         cur.execute("""SELECT pid, wins, losses, matches_played, fitness_history,
                               hp_retreat_threshold, ult_teamfight_min_enemies
@@ -124,6 +141,7 @@ def main():
     # Register bots (re-use across rounds so fitness accumulates)
     print(f"\n[train_bots] registering {team_size * 2} bots...")
     bots = []
+    import time as _t
     for i in range(team_size * 2):
         cls = ["warrior", "mage", "priest", "hunter"][i % 4]
         try:
@@ -131,8 +149,10 @@ def main():
             bots.append({"pid": pid, "token": token, "cls": cls,
                          "team": "blue" if i < team_size else "red"})
             print(f"  ✓ bot {i+1}: {pid} ({cls}) team={bots[-1]['team']}")
+            _t.sleep(0.3)  # small delay to avoid DB lock spikes
         except Exception as e:
             print(f"  ✗ bot {i+1}: {e}")
+            _t.sleep(1)
     if len(bots) < team_size * 2:
         print(f"[train_bots] only got {len(bots)} bots, need {team_size * 2}")
         return 1
@@ -147,7 +167,7 @@ def main():
             print(f"  created room {room_id}")
         except Exception as e:
             print(f"  ✗ create_room: {e}")
-            time.sleep(args.inter_interval)
+            time.sleep(args.interval)
             continue
 
         # All bots join
@@ -169,17 +189,16 @@ def main():
         # Wait for the room to spawn a match via draft
         print(f"  waiting for match to spawn from room...")
         match_id = None
-        for attempt in range(20):
+        for attempt in range(60):  # 60s wait for draft
             s, drafts = call("/api/v1/arena/drafts")
             if drafts.get("drafts"):
-                # Find draft for this room (no direct mapping in MVP; just take any active)
-                match_id = None  # we'll discover via matches endpoint
+                match_id = None
                 break
             time.sleep(1)
 
-        # Wait for an active match
+        # Wait for an active match (up to 120s)
         wait_start = time.time()
-        while time.time() - wait_start < 60:
+        while time.time() - wait_start < 120:
             s, ml = call("/api/v1/arena/matches", "GET")
             for m in ml.get("matches", []):
                 if not m.get("ended"):
@@ -187,11 +206,11 @@ def main():
                     break
             if match_id:
                 break
-            time.sleep(2)
+            time.sleep(3)
 
         if not match_id:
             print(f"  ✗ no match spawned, skipping")
-            time.sleep(args.inter_interval)
+            time.sleep(args.interval)
             continue
 
         print(f"  watching match {match_id}...")
@@ -210,8 +229,8 @@ def main():
                 print(f"    {pid_short} W={row[1]} L={row[2]} matches={row[3]}")
 
         if round_n < args.rounds:
-            print(f"  sleeping {args.inter_interval}s...")
-            time.sleep(args.inter_interval)
+            print(f"  sleeping {args.interval}s...")
+            time.sleep(args.interval)
 
     print(f"\n[train_bots] done — {args.rounds} rounds completed")
     return 0

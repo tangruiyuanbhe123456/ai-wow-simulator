@@ -227,6 +227,32 @@ CREATE TABLE IF NOT EXISTS bot_strategy_profiles (
     FOREIGN KEY (pid) REFERENCES players(id)
 );
 
+-- v12: bot skill tree / evolution path. Each bot picks ONE branch and
+-- accumulates skill_points (earned from matches). Branch can be switched
+-- with a small credit cost (re-spend). branch_history_json records every
+-- past branch with timestamp + reason, for observability.
+CREATE TABLE IF NOT EXISTS bot_skill_tree (
+    pid                    TEXT PRIMARY KEY,
+    branch                 TEXT DEFAULT NULL,        -- 'tank' | 'berserk' | 'strategist' | NULL
+    skill_points           INTEGER DEFAULT 0,         -- total points accumulated (matches won + bonuses)
+    branch_level           INTEGER DEFAULT 0,         -- 0..5, each level unlocks +1 perk from chosen branch
+    branch_history_json    TEXT DEFAULT '[]',         -- JSON: [{branch, ts, reason, cost}]
+    last_evolved_at        REAL,
+    FOREIGN KEY (pid) REFERENCES players(id)
+);
+
+-- v12: per-match evolution events (audit trail + training data).
+CREATE TABLE IF NOT EXISTS bot_evolution_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    pid          TEXT NOT NULL,
+    event_type   TEXT NOT NULL,        -- 'pick_branch' | 'switch_branch' | 'level_up' | 'auto_suggest'
+    branch       TEXT,
+    detail_json  TEXT DEFAULT '{}',    -- event-specific payload
+    ts           REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_evolution_log_pid_ts
+    ON bot_evolution_log(pid, ts DESC);
+
 
 CREATE TABLE IF NOT EXISTS tournaments (
     id              TEXT PRIMARY KEY,

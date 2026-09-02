@@ -21,6 +21,9 @@ node_modules/
 *.db-wal
 data/*.db
 
+# Match replays (generated at runtime, regenerated per match)
+data/replays/
+
 # Logs
 *.log
 logs/*.log

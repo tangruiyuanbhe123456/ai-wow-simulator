@@ -55,12 +55,49 @@ _db_lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
 
 
+# BUGFIX: per-thread DB connection cache. Before, every endpoint shared a
+# single module-level _conn through _db_lock, which caused cascading
+# "database is locked" failures whenever the tick loop or a long-running
+# endpoint held the lock longer than SQLite's busy_timeout. With per-thread
+# connections (WAL allows many readers + 1 writer) endpoints only block on
+# real write-write conflicts, and even those auto-retry via busy_timeout.
+import threading as _th
+_local = _th.local()
+_schema_initialized = False
+_schema_init_lock = _th.Lock()
+
 def db() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _conn = connect()
-        init_schema(_conn)
-    return _conn
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        conn = connect()
+        # Schema init must happen exactly once across all threads.
+        global _schema_initialized
+        if not _schema_initialized:
+            with _schema_init_lock:
+                if not _schema_initialized:
+                    init_schema(conn)
+                    _schema_initialized = True
+        _local.conn = conn
+    return conn
+
+
+def _retry_locked_db_write(fn, *args, **kwargs):
+    """BUGFIX: short retry around FastAPI DB writes that hit
+    'database is locked' during background-tick bursts. The
+    busy_timeout PRAGMA gives 5s of automatic retry at the SQLite
+    layer; this wraps the outer Python-level retry so HTTP clients
+    see a clean response instead of a 500."""
+    import time as _t
+    last = None
+    for attempt in range(6):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as e:
+            last = e
+            if "locked" not in str(e).lower():
+                raise
+            _t.sleep(0.05 * (2 ** attempt))  # 0.05..1.6s
+    raise last
 
 
 # ---- Pydantic models -------------------------------------------------------
@@ -1260,6 +1297,70 @@ def bot_upgrade(req: Request,
     }
 
 
+# ---- v12: AI skill tree / evolution endpoints -----------------------------
+
+@app.get("/api/v1/bot/{bot_pid}/skill-tree")
+def bot_skill_tree(bot_pid: str, lang: str = Query("en")):
+    """Return the bot's skill-tree state + AI suggestion + recent evolution log."""
+    from server import evolution as _evo
+    return _retry_locked_db_write(lambda: _evo.describe_tree(bot_pid))
+
+
+@app.post("/api/v1/bot/{bot_pid}/skill-tree/choose")
+def bot_skill_tree_choose(bot_pid: str,
+                           branch: str = Query(...),
+                           reason: str = Query("manual"),
+                           force: bool = Query(False),
+                           lang: str = Query("en")):
+    """Pick (or switch) the bot's evolution branch. force=True bypasses skill-point cost."""
+    from server import evolution as _evo
+    try:
+        tree = _retry_locked_db_write(
+            lambda: _evo.choose_branch(bot_pid, branch, reason=reason, force=force))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "lang": lang, "pid": bot_pid, "branch": branch,
+            "tree": tree}
+
+
+@app.get("/api/v1/bot/{bot_pid}/skill-tree/suggest")
+def bot_skill_tree_suggest(bot_pid: str, lang: str = Query("en")):
+    """AI-suggested branch (no side effects)."""
+    from server import evolution as _evo
+    sugg = _retry_locked_db_write(lambda: _evo.suggest_branch(bot_pid))
+    return {"ok": True, "lang": lang, "pid": bot_pid, **sugg}
+
+
+@app.post("/api/v1/bot/{bot_pid}/skill-tree/auto-evolve")
+def bot_skill_tree_auto_evolve(bot_pid: str, lang: str = Query("en")):
+    """AI auto-picks a branch based on suggest_branch() if the bot has none yet.
+    Idempotent: does nothing if the bot already has a branch.
+    Returns the (possibly unchanged) tree + the suggestion that drove the decision."""
+    from server import evolution as _evo
+    def _do():
+        tree = _evo.get_tree(bot_pid)
+        if tree.get("branch"):
+            return {"changed": False, "tree": tree,
+                    "reason_zh": "已有分支,无需自动选",
+                    "reason_en": "Bot already has a branch, no auto-pick needed"}
+        sugg = _evo.suggest_branch(bot_pid)
+        chosen = sugg.get("suggest")
+        if not chosen:
+            return {"changed": False, "tree": tree,
+                    "reason_zh": sugg["reason_zh"], "reason_en": sugg["reason_en"]}
+        new_tree = _evo.choose_branch(bot_pid, chosen, reason="auto_evolve")
+        return {"changed": True, "tree": new_tree, "branch_picked": chosen,
+                "reason_zh": sugg["reason_zh"], "reason_en": sugg["reason_en"]}
+    return _retry_locked_db_write(_do)
+
+
+@app.get("/skill_tree")
+@app.get("/skill_tree.html")
+def skill_tree_page():
+    """v12 skill-tree UI page."""
+    return FileResponse(str(WEB_DIR / "skill_tree.html"))
+
+
 @app.get("/api/v1/bot/{bot_pid}/strategy_recommendation")
 def bot_strategy_recommendation(bot_pid: str, lang: str = Query("en")):
     """Suggest new strategy thresholds for a bot based on recent fitness."""
@@ -2351,24 +2452,29 @@ def room_create(req: Request,
     if not auth.startswith("Bearer "):
         raise HTTPException(401, "missing Bearer token")
     token = auth[7:]
-    with _db_lock:
-        c = db()
-        cur = c.cursor()
-        cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
-        row = cur.fetchone()
-        if row is None:
-            raise HTTPException(401, "invalid token")
-        creator = row["player_id"]
-        room_id = "room_" + _sec.token_hex(4)
-        cur.execute("""INSERT INTO match_rooms
-                       (id, name, mode, status, creator_pid, region, created_at)
-                       VALUES (?, ?, ?, 'lobby', ?, ?, ?)""",
-                    (room_id, name, mode, creator, region, time.time()))
-        # Creator auto-joins as blue
-        cur.execute("""INSERT OR IGNORE INTO match_room_players
-                       (room_id, pid, team, joined_at) VALUES (?, ?, 'blue', ?)""",
-                    (room_id, creator, time.time()))
-        c.commit()
+    # BUGFIX: brief SQLite retry in case a background tick/credits thread is
+    # mid-write; without this we get sporadic 500s during heavy training load.
+    def _do_create():
+        with _db_lock:
+            c = db()
+            cur = c.cursor()
+            cur.execute("SELECT player_id FROM tokens WHERE token=?", (token,))
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(401, "invalid token")
+            creator = row["player_id"]
+            room_id = "room_" + _sec.token_hex(4)
+            cur.execute("""INSERT INTO match_rooms
+                           (id, name, mode, status, creator_pid, region, created_at)
+                           VALUES (?, ?, ?, 'lobby', ?, ?, ?)""",
+                        (room_id, name, mode, creator, region, time.time()))
+            # Creator auto-joins as blue
+            cur.execute("""INSERT OR IGNORE INTO match_room_players
+                           (room_id, pid, team, joined_at) VALUES (?, ?, 'blue', ?)""",
+                        (room_id, creator, time.time()))
+            c.commit()
+        return room_id, creator
+    room_id, creator = _retry_locked_db_write(_do_create)
     return {"ok": True, "lang": lang, "room_id": room_id, "name": name, "mode": mode,
             "creator_pid": creator, "status": "lobby"}
 
@@ -2656,10 +2762,21 @@ def arena_match_state(match_id: str, lang: str = Query("zh")):
 
 def _tick_loop():
     log.info("tick loop start, %dms interval", TICK_MS)
+    import sqlite3 as _sq
+    # BUGFIX: tick loop uses its own dedicated connection (with WAL + busy_timeout)
+    # so it never blocks FastAPI sync workers on _db_lock. WAL allows concurrent
+    # readers + one writer; combined with busy_timeout the two layers barely
+    # contend.
+    _tick_conn = connect()
     while True:
         try:
-            with _db_lock:
-                tick(db())
+            tick(_tick_conn)
+        except _sq.OperationalError as e:
+            if "locked" in str(e):
+                # Tick is best-effort; skip rather than block endpoints.
+                pass
+            else:
+                log.exception("tick error: %s", e)
         except Exception as e:
             log.exception("tick error: %s", e)
         time.sleep(TICK_MS / 1000.0)

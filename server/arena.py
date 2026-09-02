@@ -21,8 +21,28 @@ try:
 except Exception:
     DB_PATH = _Path("data/world.db")
 import threading
+import sqlite3 as _sq  # BUGFIX: used by _safe_db_write retry helper
 from dataclasses import dataclass, field
 from typing import Any
+
+
+# BUGFIX: retry wrapper for short-lived DB writes from background threads
+# (credits, fitness, rank, room_create). busy_timeout PRAGMA gives 5s of
+# automatic retry at the SQLite layer, but if contention lasts longer we
+# catch OperationalError and back off so callers don't lose data when the
+# main endpoint thread happens to be holding _db_lock.
+def _safe_db_write(fn, *args, **kwargs):
+    import time as _t
+    last = None
+    for attempt in range(6):
+        try:
+            return fn(*args, **kwargs)
+        except _sq.OperationalError as e:
+            last = e
+            if "locked" not in str(e).lower():
+                raise
+            _t.sleep(0.05 * (2 ** attempt))  # 0.05..1.6s, total ~3s
+    raise last
 
 
 # Crystal HP (tunable). With ~10 dmg/tick from each agent in range, and 5 agents
@@ -165,7 +185,13 @@ def apply_match_result(blue_pids: list, red_pids: list, winner: str) -> None:
     """Update each player's rank_rating / wins / losses after a 5v5 match.
 
     Uses simplified Elo: winner +25, loser -15. Plus shared w/l record.
+    BUGFIX: wrapped in _safe_db_write to tolerate brief SQLite contention
+    from FastAPI endpoints during peak training load.
     """
+    return _safe_db_write(_apply_match_result_impl, blue_pids, red_pids, winner)
+
+
+def _apply_match_result_impl(blue_pids: list, red_pids: list, winner: str) -> None:
     from server.db import connect as _db_connect
     c = _db_connect()
     cur = c.cursor()
@@ -415,6 +441,8 @@ def _use_ultimate(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> None:
         # Apply stun (modeled as respawn timer of 2 ticks... actually use
         # a separate stun state — for simplicity we deal +30 dmg + knockback)
         dmg = 30 + a.atk
+        if target is None or not target.alive:  # BUGFIX
+            return
         target.hp -= dmg
         m.append_log(
             f"⚡ {a.name} ({a.team}) 大招 冲锋陷阵! 冲向 {target.name} ({target.team}) 伤害 {dmg} (cd=60) | ⚡ {a.name} ({a.team}) ULT Heroic Charge! Hits {target.name} for {dmg} (cd=60)",
@@ -467,6 +495,8 @@ def _use_ultimate(a: ArenaAgent, m: ArenaMatch, tick_n: int) -> None:
         if not enemies:
             return
         target = min(enemies, key=lambda e: e.hp)
+        if target is None:  # BUGFIX
+            return
         dmg = int(70 * 1.5)  # 105 dmg (1.5x crit)
         target.hp -= dmg
         m.append_log(
@@ -855,6 +885,33 @@ def _draft_tick_loop(draft_id: str) -> None:
 
 
 
+
+
+def _award_match_credits(pid: str, won: bool) -> None:
+    """Award marketplace credits to a player after a match.
+    Win = +10 credits; Loss = +2 credits (consolation).
+    BUGFIX: wrapped in _safe_db_write to handle brief "database is locked"
+    errors when the FastAPI worker thread is mid-transaction.
+    """
+    def _do():
+        amount = 10 if won else 2
+        from server.db import connect as _db
+        c = _db()
+        cur = c.cursor()
+        cur.execute("""INSERT INTO player_credits (pid, credits, earned, last_active)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(pid) DO UPDATE SET credits=credits+?,
+                                                  earned=earned+?,
+                                                  last_active=?""",
+                    (pid, amount, amount, time.time(),
+                     amount, amount, time.time()))
+        c.commit()
+    try:
+        _safe_db_write(_do)
+    except Exception as e:
+        print(f"[credits] DB error for {pid}: {e}")
+
+
 def _update_fitness(m: ArenaMatch, blue_pids: list, red_pids: list) -> None:
     """After a match, update each bot's fitness score and adjust strategy
     thresholds slightly toward "what worked".
@@ -871,8 +928,12 @@ def _update_fitness(m: ArenaMatch, blue_pids: list, red_pids: list) -> None:
       clamp to [0.10, 0.60] for hp, [1, 8] for ult threshold
     """
     import sqlite3, json as _json
-    try:
-        c = sqlite3.connect(str(DB_PATH))
+    def _do():
+        # BUGFIX: use the standard connect() helper so PRAGMAs (busy_timeout,
+        # WAL, synchronous=NORMAL) are applied — the old hand-rolled
+        # sqlite3.connect(DB_PATH) had no PRAGMAs and raced constantly.
+        from server.db import connect as _db
+        c = _db()
         cur = c.cursor()
         all_pids = list(blue_pids) + list(red_pids)
         for pid in all_pids:
@@ -934,8 +995,23 @@ def _update_fitness(m: ArenaMatch, blue_pids: list, red_pids: list) -> None:
                              hp_thr, ult_min_en, time.time(), pid))
         c.commit()
         c.close()
+    try:
+        _safe_db_write(_do)
     except Exception as e:
         print(f"[fitness update] failed: {e}")
+
+    # v12: award skill-tree points and trigger auto level-up after the
+    # fitness write commits (best-effort; never block the match loop).
+    try:
+        from server import evolution as _evo
+        for pid in (blue_pids + red_pids):
+            won = pid in (blue_pids if m.winner == "blue" else red_pids)
+            try:
+                _evo.award_match_points(pid, won=won)
+            except Exception as _ee:
+                print(f"[evolution] award failed for {pid}: {_ee}")
+    except Exception as _outer:
+        print(f"[evolution] module import failed: {_outer}")
 
 
 
@@ -2035,6 +2111,24 @@ def _combat_step(m: ArenaMatch, rng: random.Random, tick_n: int) -> None:
                      max(1, min(ARENA_H - 2, new_pos[1])))
             continue  # movement only, no attack this tick
 
+        # ----- BUGFIX: guard against stale / wrong-type targets -----
+        # Decision layer can hand us a Tower (push), a dragon dict (contest),
+        # or an Agent (teamfight/farm). Only Agent targets should flow through
+        # the enemy branch below; tower damage is already handled by
+        # _push_towers_step; dragon damage goes through the dragon branch.
+        if target is None:
+            continue
+        is_tower = hasattr(target, "team") and hasattr(target, "lane") \
+                   and hasattr(target, "kind") and not hasattr(target, "spells")
+        if is_tower:
+            continue  # _push_towers_step already handles tower damage
+        # Dragon target is a plain dict; if it was removed this tick, skip.
+        if kind == "dragon":
+            dragon_alive = any(d.get("kind") == target.get("kind")
+                               for d in m.dragons)
+            if not dragon_alive:
+                continue
+
         # Melee range: hit target with team-buff-aware damage
         dmg = max(1, a.atk + rng.randint(0, 3))
         crit = rng.random() < 0.15
@@ -2072,6 +2166,8 @@ def _combat_step(m: ArenaMatch, rng: random.Random, tick_n: int) -> None:
             continue  # dragon combat resolved; don't fall through to enemy code
 
         # Enemy target hit
+        if not target.alive:  # BUGFIX: target may have died earlier this tick
+            continue
         dmg = _shield_absorb(target, dmg)
         if dmg <= 0:
             continue

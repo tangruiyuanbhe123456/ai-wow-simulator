@@ -23,8 +23,14 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     Path(p).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(p, check_same_thread=False, isolation_level=None)
     conn.row_factory = sqlite3.Row
+    # BUGFIX: busy_timeout lets concurrent writers wait instead of immediately
+    # raising "database is locked". 5s is plenty for the FastAPI sync worker
+    # pool (currently 40 threads).
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
+    # BUGFIX: synchronous=NORMAL is safe with WAL and faster than FULL.
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
