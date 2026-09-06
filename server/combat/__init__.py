@@ -177,6 +177,15 @@ def perform_attack(conn: sqlite3.Connection, attacker_id: str, target_id: str,
             if t_player:
                 new_hp = max(0, t_player["hp"] - dmg)
                 cur.execute("UPDATE players SET hp=? WHERE id=?", (new_hp, t_player["id"]))
+                # v14: hint death_outbox with the killer BEFORE the dispatcher
+                # picks it up, so on_death() can attribute the kill correctly.
+                if new_hp <= 0 and t_player["hp"] > 0:
+                    try:
+                        from server.death_dispatcher import set_last_damage
+                        set_last_damage(cur.connection, t_player["id"],
+                                        att["id"], att["name"])
+                    except Exception:
+                        pass
             else:
                 new_hp = max(0, t_mob["hp"] - dmg)
                 cur.execute("UPDATE mobs SET hp=? WHERE id=?", (new_hp, t_mob["id"]))

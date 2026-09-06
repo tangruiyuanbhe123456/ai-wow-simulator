@@ -1,0 +1,56 @@
+<!DOCTYPE html><html lang=zh-CN><head><meta charset=UTF-8><title>Q Coin 钱包 - AI Civil</title><style>
+body { background:#050810; color:#cdd9e5; font-family:Microsoft YaHei,monospace; margin:0; padding:20px; }
+h1 { color:#ffcc00; border-bottom:1px solid #5fb3d4; padding-bottom:8px; }
+h2 { color:#88ff88; margin-top:24px; }
+.bar { background:#0a0e14; border:1px solid #5fb3d4; padding:14px; margin:10px 0; }
+input { background:#050810; color:#ffcc00; border:1px solid #5fb3d4; padding:6px; font-family:inherit; }
+button { background:#1a1e2e; color:#ffcc00; border:1px solid #5fb3d4; padding:6px 14px; cursor:pointer; }
+button:hover { background:#2a2e3e; }
+.balance { font-size:42px; color:#ffcc00; font-weight:bold; padding:20px; }
+table { width:100%; border-collapse:collapse; margin-top:14px; }
+th { background:#1a1e2e; color:#ffcc00; padding:8px; text-align:left; border-bottom:2px solid #5fb3d4; }
+td { padding:8px; border-bottom:1px dashed #1a2030; }
+tr:hover { background:#0a0e14; }
+.kyc-ok { color:#88ff88; }
+.kyc-required { color:#ff5f5f; font-weight:bold; }
+.dir-topup { color:#88ff88; }
+.dir-gift_sent, .dir-resurrect, .dir-flower { color:#ff5f5f; }
+.dir-gift_received { color:#ffcc00; }
+.dir-gift_fee { color:#888; }
+</style></head><body><h1>Q Coin 钱包</h1><div class=bar><label>玩家 ID: </label><input id=pid style=width:300px placeholder="your_player_id"><button onclick=load()>刷新</button></div><div id=balance class=bar>请输入玩家 ID</div><div id=kyc class=bar>KYC 状态: 待加载</div><h2>近期流水 (Top 50)</h2><div id=ledger>loading...</div></body><script>
+const DIR_LABEL = {
+  zh:{topup:'充值', gift_sent:'赠予发出', gift_received:'赠予收到',
+      gift_fee:'平台抽水', resurrect:'复活消耗', flower:'献花消耗'},
+  en:{topup:'Top-up', gift_sent:'Gift Sent', gift_received:'Gift Received',
+      gift_fee:'Platform Fee', resurrect:'Resurrect', flower:'Flower'}
+};
+const LANG = (new URL(location.href).searchParams.get('lang')==='en')?'en':'zh';
+const L = DIR_LABEL[LANG];
+
+async function load(){
+  const pid = document.getElementById('pid').value.trim();
+  if(!pid) return;
+
+  // Balance
+  const bal = await fetch('/api/v1/bot/qc/balance/'+encodeURIComponent(pid)).then(r=>r.json());
+  document.getElementById('balance').innerHTML =
+    '余额　<span style=color:#88ff88>'+bal.balance+' QC</span>';
+
+  // KYC
+  const kyc = await fetch('/api/v1/bot/qc/kyc/'+encodeURIComponent(pid)).then(r=>r.json());
+  const kycCls = kyc.kyc_required ? 'kyc-required' : 'kyc-ok';
+  document.getElementById('kyc').innerHTML =
+    'KYC: <span class='+kycCls+'>'+(kyc.kyc_required?'必须验证 (需提交 ID 手机版)':'未触发')+'</span>'+
+    '<br>30天充值: '+kyc.topup_30d_qc+' QC / 30天收礴: '+kyc.gift_30d_qc+' QC'+
+    '<br>终身充值: '+kyc.lifetime_topup+' / 终身收礴: '+kyc.lifetime_gifted_in;
+
+  // Ledger: we don't have a direct endpoint yet; query the qc_ledger via a debug endpoint
+  // For now use /api/v1/bot/qc/balance plus explain that ledger view needs auth
+  // v15+ will add /qc/ledger/{pid}
+  document.getElementById('ledger').innerHTML =
+    '<p style=color:#888;font-style:italic>· 详细流水查询需要加入·</p>'+
+    '<p>带号 '+pid+' 的 QC 余额: '+bal.balance+' QC</p>';
+}
+const _p = new URL(location.href).searchParams.get('pid');
+if(_p){document.getElementById('pid').value=_p;load();}
+</script>

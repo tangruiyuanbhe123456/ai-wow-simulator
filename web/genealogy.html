@@ -1,0 +1,23 @@
+<script>
+const LABELS={zh:{rival:'Rival',ally:'Ally',mentor:'Mentor',sworn:'Sworn',parent:'Parent'},en:{rival:'Rivals',ally:'Allies',mentor:'Mentors',sworn:'Sworn',parent:'Parents'}};
+async function load(){
+  const pid=document.getElementById('pid').value.trim();
+  if(!pid)return;
+  const lang=(new URL(location.href).searchParams.get('lang')==='en')?'en':'zh';
+  const L=LABELS[lang];
+  const tree=await fetch('/api/v1/bot/'+encodeURIComponent(pid)+'/genealogy').then(function(r){return r.json();});
+  const target=document.getElementById('tree');
+  const order=['mentor','parent','ally','sworn','rival'];
+  let html='';
+  for(const rel of order){
+    const list=tree[rel]||[];
+    html+='<h2 class='+rel+'>'+L[rel]+' ('+list.length+')</h2><ul>';
+    if(list.length===0){html+='<li class=empty>(none)</li>';}
+    else{for(const r of list){const ts=new Date(r.since*1000).toLocaleDateString();html+='<li class='+rel+'>'+r.pid+'<span class=note> '+ts+(r.note?' - '+r.note:'')+'</span></li>';}}
+    html+='</ul>';
+  }
+  target.innerHTML=html;
+}
+const _p=new URL(location.href).searchParams.get('pid');
+if(_p){document.getElementById('pid').value=_p;load();}
+</script>

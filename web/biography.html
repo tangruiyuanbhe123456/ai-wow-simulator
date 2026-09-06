@@ -1,0 +1,29 @@
+<!DOCTYPE html></!DOCTYPE html>
+<html><head><meta charset=UTF-8></meta><title>Bot Bio - AI WoW Simulator v13</title><style>.bio{color:#ffcc00;background:#050810;padding:20px;font-family:monospace;}h1{border-bottom:1px solid #5fb3d4}.ch{border-left:3px solid #ffcc00;padding:10px;margin:10px 0;background:#0a0e14}.ch.origin{border-color:#5fb3d4}.ch.fall{border-color:#ff5f5f}.ch.return{border-color:#88ff88}</style></head><body class=bio><h1>Bot 生平传记 (v13)</h1><div id=bar><select id=lang><option value=zh>中文</option><option value=en>EN</option></select><input id=pid style=width:300px placeholder="bot pid"></input><button onclick=load()>加载</button></div><div id=lifecycle style=display:none></div><div id=story><div class=empty>输入 pid</div></div></body></html><script>
+const I18N = {zh:{s:'灵魂名',st:'状态',b:'出生',d:'死亡次数',dn:'DNA',f:'恐惧'},en:{s:'Soul',st:'State',b:'Born',d:'Deaths',dn:'DNA',f:'Fears'}};
+async function load(){
+  const pid=document.getElementById('pid').value.trim();
+  if(!pid)return;
+  const lang=document.getElementById('lang')?document.getElementById('lang').value:'zh';
+  const T=I18N[lang];
+  const lc=await fetch('/api/v1/bot/'+encodeURIComponent(pid)+'/lifecycle').then(r=>r.ok?r.json():null);
+  const lcDiv=document.getElementById('lifecycle');
+  if(!lc||lc.error){lcDiv.style.display='none';} else {
+    lcDiv.style.display='block';
+    const born=new Date(lc.born_at*1000).toLocaleString();
+    const fears=(lc.soul.fears||[]).map(f=>f.name+'('+f.weight+')').join(', ')||'-';
+    lcDiv.innerHTML='<div>'+T.s+': '+lc.soul_name+'</div>'+T.st+': '+lc.state+'<br>'+T.b+': '+born+'<br>'+T.d+': '+lc.death_count+'<br>'+T.dn+': '+lc.dna_seed.substring(0,16)+'<br>'+T.f+': '+fears;
+  }
+  const bio=await fetch('/api/v1/bot/'+encodeURIComponent(pid)+'/biography').then(r=>r.json());
+  const story=document.getElementById('story');
+  if(!bio||bio.length===0){story.innerHTML='<div class=empty>尚无传记。</div>';return;}
+  story.innerHTML=bio.map(function(c){
+    const title=lang==='zh'?c.title_zh:c.title_en;
+    const body=lang==='zh'?c.body_zh:c.body_en;
+    const ts=new Date(c.ts*1000).toLocaleString();
+    return '<div class="chapter '+c.chapter+'"><h3>'+(title||c.chapter)+'</h3><div class=ts>'+ts+' · '+c.chapter+'</div><div class=body>'+(body||'')+'</div></div>';
+  }).join('');
+}
+const _p=new URL(location.href).searchParams.get('pid');
+if(_p){document.getElementById('pid').value=_p;load();}
+</script>

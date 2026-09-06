@@ -1,0 +1,75 @@
+<!DOCTYPE html><html lang=zh-CN><head><meta charset=UTF-8><title>Q Coin 充值 - AI Civil</title><style>
+body { background:#050810; color:#cdd9e5; font-family:Microsoft YaHei,monospace; margin:0; padding:20px; }
+h1 { color:#ffcc00; border-bottom:1px solid #5fb3d4; padding-bottom:8px; }
+.bar { background:#0a0e14; border:1px solid #5fb3d4; padding:14px; margin:10px 0; }
+input { background:#050810; color:#ffcc00; border:1px solid #5fb3d4; padding:6px; font-family:inherit; }
+button { background:#1a1e2e; color:#ffcc00; border:1px solid #5fb3d4; padding:8px 14px; cursor:pointer; }
+button:hover { background:#2a2e3e; }
+.tier { display:inline-block; border:2px solid #5fb3d4; padding:14px 18px; margin:8px; cursor:pointer; background:#0a0e14; }
+.tier.selected { border-color:#88ff88; background:#0a2010; }
+.tier .price { font-size:22px; color:#ffcc00; font-weight:bold; }
+.tier .qc { color:#88ff88; font-size:14px; }
+.tier .bonus { color:#ff5f5f; font-size:11px; }
+.ch { display:inline-block; border:1px solid #5fb3d4; padding:8px 12px; margin:4px; cursor:pointer; background:#0a0e14; }
+.ch.selected { border-color:#88ff88; background:#0a2010; }
+</style></head><body><h1>Q Coin 充值</h1><div class=bar><label>玩家 ID: </label><input id=pid style=width:300px placeholder="your_player_id"></div><h2>1. 选择充值档位</h2><div id=tiers>loading...</div><h2>2. 选择支付渠道</h2><div id=channels>loading...</div><h2>3. 订单确认</h2><div id=summary class=bar>请先选择档位和渠道</div><button onclick=pay() style=font-size:16px;padding:12px 24px;margin-top:10px;background:#88ff88;color:#050810;border:none>✓ 确认支付</button><div id=result style=margin-top:20px;display:none></div></body><script>
+const TIERS = [
+  {id:'starter', price:'¥6',   qc:60,    bonus:0},
+  {id:'standard',price:'¥30',  qc:300,   bonus:0},
+  {id:'plus',    price:'¥98',  qc:980,   bonus:'+20 QC'},
+  {id:'pro',     price:'¥198', qc:1980,  bonus:'+80 QC'},
+  {id:'whale',   price:'¥648', qc:6480,  bonus:'+400 QC'}
+];
+const CHANNELS = [
+  {id:'wechat',name:'微信支付',region:'CN'},
+  {id:'alipay', name:'支付宝',      region:'CN'},
+  {id:'paypal', name:'PayPal',                  region:'Global'},
+  {id:'fps',    name:'香港 FPS',        region:'HK'}
+];
+let selTier=null, selChan=null;
+
+function render(){
+  document.getElementById('tiers').innerHTML = TIERS.map(t =>
+    '<div class="tier'+(selTier&&selTier.id===t.id?' selected':'')+'" onclick="sel('+t.id+','tier')">' +
+    '<div class=price>'+t.price+'</div>' +
+    '<div class=qc>'+t.qc+' QC</div>' +
+    (t.bonus?'<div class=bonus>'+t.bonus+'</div>':'') +
+    '</div>'
+  ).join('');
+  document.getElementById('channels').innerHTML = CHANNELS.map(c =>
+    '<div class="ch'+(selChan&&selChan.id===c.id?' selected':'')+'" onclick="sel(''+c.id+'','chan')">'+c.name+' ('+c.region+')</div>'
+  ).join('');
+  if(selTier && selChan){
+    const s = selChan.id==='paypal' ? ('$'+Math.round(selTier.qc/10)) : selTier.price;
+    document.getElementById('summary').innerHTML =
+      '<b>'+selChan.name+'</b> 收取 '+s+' → 赋予 <b style=color:#88ff88>'+selTier.qc+' QC</b>'+
+      (selTier.bonus?' (<span style=color:#ff5f5f>'+selTier.bonus+'</span>)':'')+
+      '<br><small>·3% 服务费已含在显示价格中</small>';
+  }
+}
+function sel(id,kind){
+  if(kind==='tier') selTier = TIERS.find(t=>t.id===id);
+  else selChan = CHANNELS.find(c=>c.id===id);
+  render();
+}
+async function pay(){
+  const pid = document.getElementById('pid').value.trim();
+  if(!pid){alert('请填入玩家 ID');return;}
+  if(!selTier||!selChan){alert('请选择档位和渠道');return;}
+  const r = await fetch('/api/v1/bot/qc/topup',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      player_pid: pid,
+      qc_amount: selTier.qc,
+      order_id: selChan.id+'_'+selTier.id+'_'+Date.now(),
+      note: 'topup via '+selChan.name+' tier '+selTier.id
+    })
+  }).then(r=>r.json());
+  if(r.error){alert('失败: '+r.error);return;}
+  document.getElementById('result').style.display='block';
+  document.getElementById('result').innerHTML =
+    '✅ 充值成功！<br>'+selTier.qc+' QC 已到账<br>现余额: <b style=color:#88ff88>'+r.balance+' QC</b>';
+  render();
+}
+render();
+</script>

@@ -50,6 +50,11 @@ log = logging.getLogger("wow")
 app = FastAPI(title="AI WoW Simulator", version="1.0.0")
 app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
+# v13: register digital life layer router at import time (on_startup
+# is deprecated and runs after the test client sends its first request).
+from server.api_v13 import router as v13_router
+app.include_router(v13_router)
+
 # DB connection (single-threaded via lock for simplicity in this scale)
 _db_lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
@@ -2792,8 +2797,31 @@ def on_startup():
     with _db_lock:
         init_schema(db())
         spawn_world_mobs(db())
+        # v13: digital life layer schema
+        from server.db.schema_v13 import ensure_v13_schema
+        ensure_v13_schema(db())
+        # v14: QC wallet + ledger + death outbox + SQLite trigger
+        from server.db.schema_v14 import ensure_v14_schema
+        ensure_v14_schema(db())
+        # v15: AI Citizen DID + bot wallet + security layer
+        from server.db.schema_v15 import ensure_v15_schema
+        ensure_v15_schema(db())
     start_background_tick()
-    log.info("AI WoW Simulator ready on %s:%d", HOST, PORT)
+    # v14: start death dispatcher thread
+    import threading
+    _death_thread_stop = threading.Event()
+    def _death_loop():
+        import logging
+        log_d = logging.getLogger("v14-death")
+        while not _death_thread_stop.is_set():
+            try:
+                from server.death_dispatcher import process_pending
+                process_pending(db(), limit=20)
+            except Exception as e:
+                log_d.exception("death tick error: %s", e)
+            _death_thread_stop.wait(2.0)
+    threading.Thread(target=_death_loop, daemon=True, name="v14-death-dispatcher").start()
+    log.info("AI WoW Simulator ready on %s:%d (v13+v14+v15)", HOST, PORT)
 
 
 def main():

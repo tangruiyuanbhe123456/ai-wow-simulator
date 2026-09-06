@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Memorials - AI Civil v14</title>
+<style>
+  body{background:#050810;color:#cdd9e5;font-family:Microsoft YaIei,monospace;margin:0;padding:20px;}
+  h1{color:#ffcc00;border-bottom:1px solid #5fb3d4;padding-bottom:8px;}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,mineax(380px,1fr));gap:14px;margin-top:14px;}
+  .grave{background:linear-gradient(180deg,#0a0e14,#1a1018);border:1px solid #5fb3d4;padding:14px;position:relative;}
+  .grave.alive{background:#0a1410;border-color:#88ff88;}
+  .grave .soul{color:#ffcc00;font-size:16px;font-weight:bold;}
+  .grave .epitaph{color:#aab;font-style:italic;margin:10px 0;line-height:1.5;min-height:48px;}
+  .grave .where{color:#888;font-size:11px;}
+  .grave .flowers{color:"88ff88;margin-top:8px;}
+  .grave .actions{margin-top:10px;padding-top:10px;border-top:1px dashed #1a030}
+  .grave input{width:90px;background:#050810;color:#ffcc00;border:1px solid #5fb3d4;padding:4px 6px;font-family:inherit;}
+  .grave input.pid{width:200px;}
+  .grave button{background:#1a1e2e;color:#ffcc00;border:1px solid #5fb3d4;padding:4px 10px;cursor:pointer;font-family:inherit;margin-top:4px;}
+  .grave button.flower{color:#ff5f5f;border-color:#ff5f5f;}
+  .grave button.resurrect{color:#88ff88;border-color:#88ff88;}
+  .empty{color:#666;font-style:italic;padding:30px;text-align:center;}
+  .state-tag{display:inline-block;font-size:10px;padding:2px 6px;margin-left:6px;border-radius:3px;}
+  .state-tag.alive{background:"88ff88;color:#050810;}
+  .state-tag.sleeping{background:#ff5f5f;color:#050810;}
+</style>
+</head>
+<body>
+<h1>Tombstone Garden (v14 - real wallet)</h1>
+<div id="grid">
+<div class="empty">Loading...</div>
+</div>
+<script>
+async function flower(pid){
+  const from = document.getElementById('from_'+pid).value.trim();
+  if(!from){alert('Please enter your player ID');return;}
+  const amt = parseInt(document.getElementById('amt_'+pid).value)||10;
+  const r1 = await fetch('/api/v1/bot/qc/spend/'+encodeURIComponent(pid)+'/flower',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from_pid:from,qc_amount:amt})}).then(function(r){return r.json();});
+  if(r1.error){alert('Payment failed: '+r1.error+' (balance: '+r1.balance+' QC)');return;}
+  const r2 = await fetch('/api/v1/bot/'+encodeURIComponent(pid)+'/memorial/flower',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from_pid:from,qc_amount:amt})}).then(function(r){return r.json();});
+  alert('Flowers placed. Total: '+r2.flowers+' (your balance: '+r1.balance+' QC)');
+  load();
+}
+async function resurrect(pid){
+  const from = document.getElementById('from_'+pid).value.trim();
+  if(!from){alert('Please enter your player ID');return;}
+  const amt = parseInt(document.getElementById('amt_'+pid).value)||100;
+  const r1 = await fetch('/api/v1/bot/qc/spend/'+encodeURIComponent(pid)+'/resurrect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from_pid:from,qc_amount:amt})}).then(function(r){return r.json();});
+  if(r1.error){alert('Resurrect failed: '+r1.error+' (balance: '+r1.balance+' QC)');return;}
+  const r2 = await fetch('/api/v1/bot/'+encodeURIComponent(pid)+'/resurrect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payer_pid:from,qc_spent:amt})}).then(function(r){return r.json();});
+  if(r2.error){alert('Lifecycle error: '+r2.error);return;}
+  alert('Soul awakened! -'+amt+' QC (balance: '+r1.balance+' QC)');
+  load();
+}
+async function load(){
+  const r = await fetch('/api/v1/bot/memorials').then(function(r){return r.ok?r.json():[];});
+  const grid = document.getElementById('grid');
+  if(!r||r.length===0){grid.innerHTML='<div class=empty>The graveyard is empty. Rest in peace.';return;}
+  grid.innerHTML=r.map(function(g){
+    const stateClass=g.state==='alive'?'alive':'sleeping';
+    const stateLabel=g.state==='alive'?'alive':'resting';
+    const resBtn=g.state==='sleeping'?' <button class=resurrect onclick=resurrect(''+g.pid+'')>Resurrect (100 QC)':'';
+    return '<div class="grave '+g.state+'"><div class=soul>'+g.soul_name+' <span class="state-tag '+stateClass+'">'+stateLabel+'<div class=epitaph>'+(g.epitaph_zh||g.epitaph_en||'')+'<div class=where>fell at '+g.zone+' - death #'+g.death_no+'<div class=flowers>Flowers: '+g.flowers+'<div class=actions><input class=pid id=from_'+g.pid+' placeholder="your player id"><input id=amt_'+g.pid+' type=number value=10 min=1> <button class=flower onclick=flower(''+g.pid+'')>Flower'+resBtn+'';
+  }).join('');
+}
+load();setInterval(load,10000);
+</script></body>

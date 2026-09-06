@@ -1,0 +1,57 @@
+<!DOCTYPE html><html lang=zh-CN><head><meta charset=UTF-8><title>赠予 Q Coin - AI Civil</title><style>
+body { background:#050810; color:#cdd9e5; font-family:Microsoft YaHei,monospace; margin:0; padding:20px; }
+h1 { color:#ffcc00; border-bottom:1px solid #5fb3d4; padding-bottom:8px; }
+h2 { color:#88ff88; margin-top:24px; }
+.bar { background:#0a0e14; border:1px solid #5fb3d4; padding:14px; margin:10px 0; }
+input { background:#050810; color:#ffcc00; border:1px solid #5fb3d4; padding:6px; font-family:inherit; }
+button { background:#1a1e2e; color:#ffcc00; border:1px solid #5fb3d4; padding:8px 16px; cursor:pointer; font-size:14px; }
+button:hover { background:#2a2e3e; }
+button.confirm { background:#88ff88; color:#050810; border:none; }
+.bot-card { display:inline-block; border:1px solid #5fb3d4; padding:12px; margin:8px; cursor:pointer; background:#0a0e14; min-width:200px; }
+.bot-card.selected { border-color:#ffcc00; background:#1a1e0e; }
+.bot-card .soul { color:#ffcc00; font-weight:bold; }
+.bot-card .state-alive { color:#88ff88; }
+.bot-card .state-sleeping { color:#ff5f5f; }
+.preview { background:#1a1e2e; padding:14px; border-left:4px solid #ffcc00; margin:14px 0; }
+.fee { color:#ff5f5f; font-weight:bold; }
+</style></head><body><h1>赠予 Q Coin</h1><div class=bar><label>你的玩家 ID: </label><input id=from style=width:300px placeholder="your_player_id"></div><h2>1. 选择接收方 (人类玩家)</h2><div class=bar><input id=to placeholder="target_player_id" style=width:300px><div id=toBalance style=color:#888;margin-top:6px></div></div><h2>2. 输入金额 (最低 10 QC)</h2><div class=bar><input id=amount type=number value=100 min=10 max=500> QC<div id=preview class=preview>输入金额查看预览</div></div><h2>3. 确认赠予</h2><button class=confirm onclick=gift()>✓ 确认赠予</button><div id=result style=margin-top:20px;display:none></div></body><script>
+const FEE_PCT = 20;
+async function refreshPreview(){
+  const amt = parseInt(document.getElementById('amount').value) || 0;
+  const fee = Math.floor(amt * FEE_PCT / 100);
+  const net = amt - fee;
+  document.getElementById('preview').innerHTML =
+    '你将支出: <b>'+amt+' QC</b><br>'+
+    '平台抽水 (<span class=fee>'+FEE_PCT+'%</span>): '+fee+' QC<br>'+
+    '接收方实际收到: <span style=color:#88ff88>'+net+' QC</span>';
+  // Also check receiver balance
+  const to = document.getElementById('to').value.trim();
+  if(to){
+    const b = await fetch('/api/v1/bot/qc/balance/'+encodeURIComponent(to)).then(r=>r.json());
+    document.getElementById('toBalance').innerText = to+' 当前余额: '+b.balance+' QC';
+  }
+}
+document.getElementById('amount').addEventListener('input', refreshPreview);
+document.getElementById('to').addEventListener('change', refreshPreview);
+
+async function gift(){
+  const from = document.getElementById('from').value.trim();
+  const to = document.getElementById('to').value.trim();
+  const amt = parseInt(document.getElementById('amount').value) || 0;
+  if(!from||!to){alert('请填入·发送方·和·接收方·');return;}
+  if(amt<10){alert('最低 10 QC');return;}
+  const r = await fetch('/api/v1/bot/qc/gift',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({from_pid: from, to_pid: to, qc_amount: amt})
+  }).then(r=>r.json());
+  if(r.error){alert('失败: '+r.error);return;}
+  document.getElementById('result').style.display='block';
+  document.getElementById('result').innerHTML =
+    '✅ 赠予成功！<br>'+
+    '发送方余额: '+r.from_balance+' QC<br>'+
+    '接收方收到: '+r.to_balance+' QC (减掉 20% 平台费)'+
+    '<br>平台收入: '+r.fee+' QC';
+  refreshPreview();
+}
+refreshPreview();
+</script>
