@@ -54,6 +54,9 @@ app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 # is deprecated and runs after the test client sends its first request).
 from server.api_v13 import router as v13_router
 app.include_router(v13_router)
+# v16: Guardian Protocol router
+from server.api_v16 import router as v16_router
+app.include_router(v16_router)
 
 # DB connection (single-threaded via lock for simplicity in this scale)
 _db_lock = threading.Lock()
@@ -2806,6 +2809,9 @@ def on_startup():
         # v15: AI Citizen DID + bot wallet + security layer
         from server.db.schema_v15 import ensure_v15_schema
         ensure_v15_schema(db())
+        # v16: Guardian Protocol (threats / responses / chests / decisions)
+        from server.db.schema_v16 import ensure_v16_schema
+        ensure_v16_schema(db())
     start_background_tick()
     # v14: start death dispatcher thread
     import threading
@@ -2821,7 +2827,7 @@ def on_startup():
                 log_d.exception("death tick error: %s", e)
             _death_thread_stop.wait(2.0)
     threading.Thread(target=_death_loop, daemon=True, name="v14-death-dispatcher").start()
-    log.info("AI WoW Simulator ready on %s:%d (v13+v14+v15)", HOST, PORT)
+    log.info("AI WoW Simulator ready on %s:%d (v13+v14+v15+v16)", HOST, PORT)
 
 
 def main():
