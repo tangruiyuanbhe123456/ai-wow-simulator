@@ -14,7 +14,10 @@ Tests:
 """
 from __future__ import annotations
 import sys
+import os
 import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from server.db import connect
 from server.db.schema_v13 import ensure_v13_schema
@@ -58,6 +61,7 @@ def main():
     ensure_v16_schema(c)
 
     # Clean
+    c.execute("PRAGMA foreign_keys=OFF")
     c.executescript("""
         DELETE FROM guardian_audit;
         DELETE FROM guardian_chests;
@@ -78,6 +82,7 @@ def main():
         DELETE FROM bot_lifecycle WHERE pid LIKE 'g16_%';
         DELETE FROM players WHERE id LIKE 'g16_%';
     """)
+    c.execute("PRAGMA foreign_keys=ON")
     c.commit()
 
     # Create guardian bots (alive) + 1 sleeping bot

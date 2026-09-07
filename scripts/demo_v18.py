@@ -90,6 +90,32 @@ def main():
         fn(c)
     c.close()
 
+    # Purge stale demo rows from previous runs (idempotent across v16/v17/v18)
+    PURGE_PREFIXES = ("demo_v17_%", "v18_%", "g16_%")
+    c = connect()
+    c.execute("PRAGMA foreign_keys=OFF")
+    cur = c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    tables = [r[0] for r in cur.fetchall()]
+    for tbl in tables:
+        col_check = c.execute(f"PRAGMA table_info({tbl})").fetchall()
+        col_names = {row[1] for row in col_check}
+        for prefix in PURGE_PREFIXES:
+            if "pid" in col_names:
+                c.execute(f"DELETE FROM {tbl} WHERE pid LIKE ?", (prefix,))
+            if "guardian_pid" in col_names:
+                c.execute(f"DELETE FROM {tbl} WHERE guardian_pid LIKE ?", (prefix,))
+    # Also nuke orphan guardian tables (threats / responses / etc.)
+    for tbl in ("threats", "guardian_responses", "guardian_chests",
+                "guardian_audit", "guardian_council", "guardian_proposals",
+                "guardian_votes", "council_fund"):
+        try:
+            c.execute(f"DELETE FROM {tbl}")
+        except Exception:
+            pass
+    c.execute("PRAGMA foreign_keys=ON")
+    c.commit()
+    c.close()
+
     # === Setup: 4 bots across the 4 tier thresholds ===
     bot_bronze = "v18_bronze_" + secrets.token_hex(4)
     bot_silver = "v18_silver_" + secrets.token_hex(4)

@@ -300,10 +300,20 @@ def list_proposals(conn, status: Optional[str] = None, limit: int = 50) -> list:
 
 # --- Council Fund -----------------------------------------------------------
 
+def _ensure_fund_row(conn) -> None:
+    """Make sure the singleton fund row exists before read/write."""
+    conn.execute(
+        "INSERT OR IGNORE INTO council_fund (id, balance_qc, total_received, total_paid_out, last_updated) "
+        "VALUES (1, 0, 0, 0, NULL)"
+    )
+    conn.commit()
+
+
 def contribute_to_fund(conn, qc_amount: int, reason: str = "") -> dict:
     """Platform-side: route 5% of revenue into the council fund."""
     if qc_amount <= 0:
         return {"error": "amount_must_be_positive"}
+    _ensure_fund_row(conn)
     conn.execute(
         """UPDATE council_fund
            SET balance_qc = balance_qc + ?,
@@ -321,8 +331,9 @@ def distribute_fund(conn) -> dict:
 
     Returns the per-member payout. Idempotent per call: drains the fund.
     """
+    _ensure_fund_row(conn)
     cur = conn.execute("SELECT balance_qc FROM council_fund WHERE id=1")
-    balance = cur.fetchone()[0] or 0
+    balance = (cur.fetchone() or (0,))[0] or 0
     if balance <= 0:
         return {"distributed": 0, "members": [], "reason": "empty_fund"}
 
@@ -365,6 +376,13 @@ def get_fund(conn) -> dict:
         "SELECT balance_qc, total_received, total_paid_out, last_updated FROM council_fund WHERE id=1"
     )
     r = cur.fetchone()
+    if not r:
+        return {
+            "balance_qc": 0,
+            "total_received": 0,
+            "total_paid_out": 0,
+            "last_updated": None,
+        }
     return {
         "balance_qc": r[0] or 0,
         "total_received": r[1] or 0,
