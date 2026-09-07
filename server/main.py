@@ -1562,6 +1562,40 @@ def tournament_page():
     return FileResponse(str(WEB_DIR / "tournament.html"))
 
 
+# ---- v18.3 Player-side UI (login / recharge / wallet / gift) ----------------
+
+@app.get("/player/login")
+@app.get("/player/login.html")
+@app.get("/player_login.html")
+def player_login_page():
+    """Player login / register UI."""
+    return FileResponse(str(WEB_DIR / "player_login.html"))
+
+
+@app.get("/player/recharge")
+@app.get("/player/recharge.html")
+@app.get("/player_recharge.html")
+def player_recharge_page():
+    """Player Q-coin recharge UI."""
+    return FileResponse(str(WEB_DIR / "player_recharge.html"))
+
+
+@app.get("/player/wallet")
+@app.get("/player/wallet.html")
+@app.get("/player_wallet.html")
+def player_wallet_page():
+    """Player Q-coin wallet UI."""
+    return FileResponse(str(WEB_DIR / "player_wallet.html"))
+
+
+@app.get("/player/gift")
+@app.get("/player/gift.html")
+@app.get("/player_gift.html")
+def player_gift_page():
+    """Player gift-to-bot UI."""
+    return FileResponse(str(WEB_DIR / "player_gift.html"))
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "ts": time.time(), "version": "1.0.0"}
