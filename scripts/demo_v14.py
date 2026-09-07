@@ -12,7 +12,10 @@ Tests:
 """
 from __future__ import annotations
 import sys
+import os
 import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from server.db import connect
 from server.db.schema_v13 import ensure_v13_schema
@@ -48,6 +51,7 @@ def main():
     ensure_v14_schema(c)
 
     # Clean slate for the bots under test
+    c.execute("PRAGMA foreign_keys=OFF")
     c.executescript("""
         DELETE FROM death_outbox WHERE pid IN ('bot_v_001','bot_k_002');
         DELETE FROM qc_ledger WHERE from_pid IN ('alice','bob') OR to_pid IN ('alice','bob');
@@ -60,6 +64,7 @@ def main():
         DELETE FROM bot_lifecycle WHERE pid IN ('bot_v_001','bot_k_002');
         DELETE FROM players WHERE id IN ('bot_v_001','bot_k_002','alice','bob');
     """)
+    c.execute("PRAGMA foreign_keys=ON")
     c.commit()
 
     _ensure_player(c, "bot_v_001", "Victim")

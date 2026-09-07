@@ -1,7 +1,10 @@
 """V15 end-to-end demo: DID + bot wallet + security layer."""
 from __future__ import annotations
 import sys
+import os
 import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from server.db import connect
 from server.db.schema_v13 import ensure_v13_schema

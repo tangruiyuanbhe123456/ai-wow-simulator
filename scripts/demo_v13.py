@@ -15,8 +15,11 @@ Simulates:
 """
 from __future__ import annotations
 import sys
+import os
 import time
 import json
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Direct DB access (skip server) for fast verification
 from server.db import connect
