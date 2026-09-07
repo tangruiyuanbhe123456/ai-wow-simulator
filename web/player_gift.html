@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>赠予 Bot - AI Civil 玩家端</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0d0e14;color:#cdd9e5;font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;font-size:17px;padding:20px;min-width:360px}
+  h1{color:#a259ff;margin:0 0 16px;font-size:22px}
+  h2{color:#cdd9e5;font-size:16px;margin:0 0 10px}
+  .top{display:flex;justify-content:space-between;align-items:center;background:#1a1c25;border-radius:18px;padding:12px 18px;margin-bottom:12px}
+  .top .bal{color:#a259ff;font-weight:bold;font-size:20px}
+  .top .bal small{color:#7a7f8c;font-size:12px;font-weight:normal;margin-left:6px}
+  .rmt{background:linear-gradient(90deg,#3a1a4a,#1a1c25);border:1px solid #a259ff;border-radius:14px;padding:10px 16px;margin-bottom:18px;color:#ffcc88;font-size:13px}
+  .card{background:#1a1c25;border-radius:18px;padding:18px;margin-bottom:16px}
+  label{display:block;color:#9aa0ad;font-size:13px;margin-bottom:6px}
+  select,input,textarea{width:100%;background:#0d0e14;color:#fff;border:1px solid #2a2d3a;border-radius:12px;padding:10px 12px;font-size:15px;font-family:inherit}
+  select:focus,input:focus,textarea:focus{outline:none;border-color:#a259ff}
+  textarea{resize:vertical;min-height:70px}
+  .row{display:flex;gap:10px;align-items:center}
+  .row > *{flex:1}
+  .pill{display:inline-block;background:#0d0e14;border:1px solid #2a2d3a;border-radius:10px;padding:3px 8px;font-size:12px;color:#9aa0ad;margin-left:6px}
+  .pill.lvl{color:#a259ff;border-color:#a259ff}
+  .preview{margin-top:14px;background:linear-gradient(135deg,#241835,#1a1c25);border-left:4px solid #a259ff;border-radius:14px;padding:14px 16px}
+  .preview .head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .preview .avatar{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#a259ff,#6e3aff);display:flex;align-items:center;justify-content:center;font-weight:bold;color:#fff;font-size:15px}
+  .preview .botname{font-weight:bold;color:#fff}
+  .preview .row2{display:flex;justify-content:space-between;padding:4px 0;font-size:14px}
+  .preview .row2 .k{color:#9aa0ad}
+  .preview .row2 .v{color:#fff;font-weight:bold}
+  .preview .deduct .v{color:#ff8888}
+  .preview .recv .v{color:#88ff88}
+  .preview .fee .v{color:#ffcc88}
+  .btn{width:100%;background:linear-gradient(135deg,#a259ff,#6e3aff);color:#fff;border:none;border-radius:14px;padding:14px;font-size:16px;font-weight:bold;cursor:pointer;transition:opacity .15s,filter .15s}
+  .btn:hover{filter:brightness(1.15)}
+  .btn:disabled{background:#2a2d3a;color:#5a5f6c;cursor:not-allowed}
+  .warn{color:#ffcc88;font-size:12px;margin-top:8px;display:none}
+  .warn.on{display:block}
+  .rec-list{list-style:none;margin:0;padding:0}
+  .rec-list li{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px dashed #2a2d3a;font-size:13px}
+  .rec-list li:last-child{border:none}
+  .rec-list .who{color:#9aa0ad}
+  .rec-list .amt{color:#ff8888;font-weight:bold}
+  .rec-list .msg{color:#7a7f8c;font-size:12px;margin-top:3px}
+  .empty{color:#5a5f6c;font-size:13px;text-align:center;padding:20px 0}
+  .err{color:#ff8888;font-size:13px;margin-top:8px}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <div>玩家 <span id="me" style="color:#a259ff">--</span></div>
+  <div class="bal"><span id="balance">--</span> Q币<small id="balSub"></small></div>
+</div>
+
+<div class="rmt">⚠ Q 币不可交易、不可提现(法律红线 EULA/TOS)。赠予单次上限 5000,单日上限 20000,同 bot 单日上限 5000。</div>
+
+<div class="card">
+  <h2>① 选择 Bot</h2>
+  <label>从下方下拉选择要赠予的 Bot(显示等级 + 守护等级)</label>
+  <select id="botSel"><option value="">加载中…</option></select>
+  <div id="botInfo" class="pill" style="margin-top:8px;display:none"></div>
+</div>
+
+<div class="card">
+  <h2>② 输入金额与留言</h2>
+  <label>Q 币金额(1 - 5000)</label>
+  <input id="amount" type="number" min="1" max="5000" value="100" inputmode="numeric">
+
+  <label style="margin-top:12px">留言(可选,200 字以内,公开显示在 Bot 生平里)</label>
+  <textarea id="msg" maxlength="200" placeholder="给 Bot 的一句话…"></textarea>
+  <div style="text-align:right;color:#7a7f8c;font-size:11px;margin-top:3px"><span id="msgCnt">0</span>/200</div>
+
+  <div id="preview" class="preview">
+    <div class="head">
+      <div class="avatar" id="prevAvatar">?</div>
+      <div>
+        <div class="botname" id="prevName">尚未选择 Bot</div>
+        <div style="color:#9aa0ad;font-size:12px" id="prevMeta">请先在上方选择 Bot</div>
+      </div>
+    </div>
+    <div class="row2 deduct"><span class="k">扣减</span><span class="v" id="prevDeduct">0 Q币</span></div>
+    <div class="row2 recv"><span class="k">Bot 收到 (80%)</span><span class="v" id="prevRecv">0 Q币</span></div>
+    <div class="row2 fee"><span class="k">平台服务费 (20%)</span><span class="v" id="prevFee">0 Q币</span></div>
+  </div>
+
+  <div id="warn" class="warn"></div>
+  <div id="err" class="err"></div>
+
+  <div style="margin-top:14px">
+    <button id="btnGift" class="btn" disabled>确认赠予</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>③ 最近 5 次赠予记录</h2>
+  <ul id="recList" class="rec-list"><li class="empty">暂无记录</li></ul>
+</div>
+
+<script>
+// ---------- 工具 ----------
+const TOKEN_KEY='aicivil_token';
+const PLAYER_KEY='aicivil_player_id';
+const TOKEN=localStorage.getItem(TOKEN_KEY);
+const PLAYER=localStorage.getItem(PLAYER_KEY);
+if(!TOKEN||!PLAYER){document.body.innerHTML='<div style="padding:40px;text-align:center;color:#a259ff">请先 <a href="/web/player_login.html" style="color:#a259ff">登录</a></div>';}
+document.getElementById('me').textContent=PLAYER||'未登录';
+
+const FEE_PCT=20;
+const RECV_PCT=80;
+const LIMIT_ONCE=5000;
+const LIMIT_DAILY=20000;
+const LIMIT_DAILY_PER_BOT=5000;
+
+const $=id=>document.getElementById(id);
+
+// ---------- 加载 Bot 列表 ----------
+async function loadBots(){
+  try{
+    const r=await fetch('/api/v1/bot/list?alive=true&limit=50');
+    const bots=await r.json();
+    const sel=$('botSel');
+    if(!Array.isArray(bots)||bots.length===0){sel.innerHTML='<option value="">暂无可赠予的 Bot</option>';return;}
+    sel.innerHTML='<option value="">-- 请选择 Bot --</option>'+bots.map(b=>{
+      const n=String(b.name||b.pid||b.bot_pid||'?');
+      return `<option value="${b.pid||b.bot_pid}" data-name="${n}" data-level="${b.level||1}" data-tier="${b.guardian_tier||0}">${n} · Lv.${b.level||1} · 守护 ${b.guardian_tier||0}</option>`;
+    }).join('');
+  }catch(e){$('botSel').innerHTML='<option value="">Bot 列表加载失败</option>';}
+}
+
+// ---------- 加载余额 ----------
+async function loadBalance(){
+  try{
+    const r=await fetch('/api/v1/wallet/balance?player_id='+encodeURIComponent(PLAYER));
+    const d=await r.json();
+    const bal=d.qc_balance||d.balance||0;
+    $('balance').textContent=bal.toLocaleString();
+    $('balSub').textContent='累计充值 ¥'+(d.total_recharged_cny||0).toFixed(2);
+    return bal;
+  }catch(e){$('balance').textContent='--';return 0;}
+}
+
+// ---------- 加载最近赠予记录 ----------
+async function loadRecents(){
+  try{
+    const r=await fetch('/api/v1/wallet/transactions?limit=50');
+    const list=await r.json();
+    const gifts=(Array.isArray(list)?list:[]).filter(t=>t.type==='gift'||t.type==='赠予 bot'||t.direction==='gift_sent').slice(0,5);
+    if(gifts.length===0){$('recList').innerHTML='<li class="empty">暂无赠予记录</li>';return;}
+    $('recList').innerHTML=gifts.map(g=>{
+      const ts=g.ts?new Date(g.ts*1000).toLocaleString('zh-CN'):(g.time||'');
+      const who=g.bot_pid||g.target||'';
+      const amt=Math.abs(g.amount||g.qc_amount||0);
+      const msg=g.message||g.note||'';
+      return `<li><div style="flex:1"><div class="who">${ts} → ${who}</div>${msg?`<div class="msg">"${msg}"</div>`:''}</div><div class="amt">-${amt}</div></li>`;
+    }).join('');
+  }catch(e){$('recList').innerHTML='<li class="empty">记录加载失败</li>';}
+}
+
+// ---------- 实时预览 ----------
+function refreshPreview(){
+  const amt=parseInt($('amount').value)||0;
+  const fee=Math.floor(amt*FEE_PCT/100);
+  const recv=amt-fee;
+  $('prevDeduct').textContent=amt+' Q币';
+  $('prevRecv').textContent=recv+' Q币';
+  $('prevFee').textContent=fee+' Q币';
+
+  const opt=$('botSel').selectedOptions[0];
+  if(opt&&opt.value){
+    const name=opt.dataset.name;
+    const lv=opt.dataset.level;
+    const tier=opt.dataset.tier;
+    $('prevName').textContent=name;
+    $('prevMeta').textContent=`Lv.${lv} · 守护 ${tier} 级`;
+    $('prevAvatar').textContent=name.charAt(0);
+    $('botInfo').style.display='inline-block';
+    $('botInfo').textContent=`已选: ${name} · Lv.${lv}`;
+  }else{
+    $('prevName').textContent='尚未选择 Bot';
+    $('prevMeta').textContent='请先在上方选择 Bot';
+    $('prevAvatar').textContent='?';
+    $('botInfo').style.display='none';
+  }
+
+  // 防 RMT 校验
+  const warn=$('warn');warn.className='warn';warn.textContent='';
+  let ok=true;
+  if(amt<=0){ok=false;}
+  else if(amt>LIMIT_ONCE){warn.textContent=`⚠ 单次赠予上限 ${LIMIT_ONCE} Q币`;warn.className='warn on';ok=false;}
+  else if(amt>LIMIT_DAILY){warn.textContent=`⚠ 单日累计上限 ${LIMIT_DAILY} Q币`;warn.className='warn on';ok=false;}
+
+  $('btnGift').disabled=!ok||!opt||!opt.value;
+}
+
+// ---------- 字数计数 ----------
+$('msg').addEventListener('input',()=>{$('msgCnt').textContent=$('msg').value.length;});
+$('amount').addEventListener('input',refreshPreview);
+$('botSel').addEventListener('change',refreshPreview);
+
+// ---------- 提交赠予 ----------
+async function doGift(){
+  const opt=$('botSel').selectedOptions[0];
+  if(!opt||!opt.value){$('err').textContent='请选择 Bot';return;}
+  const amt=parseInt($('amount').value)||0;
+  const msg=$('msg').value.trim();
+  const btn=$('btnGift');btn.disabled=true;btn.textContent='处理中…';
+  $('err').textContent='';
+  try{
+    const r=await fetch('/api/v1/wallet/gift',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},
+      body:JSON.stringify({player_id:PLAYER,bot_pid:opt.value,qc_amount:amt,message:msg})
+    });
+    const d=await r.json();
+    if(!r.ok||d.error){throw new Error(d.error||d.detail||('HTTP '+r.status));}
+    btn.textContent='✓ 赠予成功';btn.style.background='#22aa55';
+    await loadBalance();
+    await loadRecents();
+    setTimeout(()=>{btn.style.background='';btn.textContent='确认赠予';refreshPreview();},2000);
+  }catch(e){
+    btn.disabled=false;btn.textContent='确认赠予';
+    $('err').textContent='赠予失败:'+e.message;
+  }
+}
+$('btnGift').addEventListener('click',doGift);
+
+// ---------- 启动 ----------
+(async()=>{
+  if(!TOKEN)return;
+  await Promise.all([loadBots(),loadBalance(),loadRecents()]);
+  refreshPreview();
+})();
+</script>
+</body>
+</html>

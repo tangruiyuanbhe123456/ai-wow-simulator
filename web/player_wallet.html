@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Q 币钱包 - AI Civil</title>
+<style>
+  /* ===== AI Civil — Player Wallet (v17+) =====
+     Visual style mirrors council.html / guardian.html:
+       bg #050810  ·  card #0d0a18 / #1a1c25
+       primary #a259ff · gradient #6e3aff
+       radius 16-22px, 17px body font */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: #050810;
+    color: #e0d8f0;
+    font-family: "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 17px;
+    line-height: 1.5;
+    min-height: 100vh;
+    padding-bottom: 32px;
+  }
+
+  /* ---- RMT warning banner (always-on, not dismissible) ---- */
+  .rmt-banner {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: linear-gradient(90deg, #2a0a18 0%, #3a0a22 50%, #2a0a18 100%);
+    border-bottom: 2px solid #ff5f5f;
+    color: #ffcccc;
+    padding: 12px 20px;
+    text-align: center;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    box-shadow: 0 2px 12px rgba(255, 95, 95, 0.25);
+  }
+  .rmt-banner .icon {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    vertical-align: -4px;
+    margin-right: 8px;
+  }
+  .rmt-banner strong {
+    color: #ff5f5f;
+    margin-right: 6px;
+  }
+
+  /* ---- Top nav ---- */
+  .topnav {
+    background: #0a0a14;
+    border-bottom: 1px solid #2a2c35;
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    flex-wrap: wrap;
+  }
+  .topnav .brand {
+    color: #a259ff;
+    font-weight: bold;
+    font-size: 18px;
+    letter-spacing: 0.5px;
+  }
+  .topnav .brand .sub {
+    color: #6e3aff;
+    font-size: 12px;
+    font-weight: normal;
+    margin-left: 6px;
+  }
+  .topnav a {
+    color: #e0d8f0;
+    text-decoration: none;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    transition: background 0.15s;
+  }
+  .topnav a:hover { background: #1a1c25; }
+  .topnav a.active {
+    background: #6e3aff;
+    color: #fff;
+  }
+  .topnav .spacer { flex: 1; }
+  .topnav .user {
+    color: #888;
+    font-size: 13px;
+  }
+  .topnav .user .pid {
+    color: #a259ff;
+    font-family: monospace;
+  }
+
+  /* ---- Page container ---- */
+  .container {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 24px 20px;
+  }
+  h1 {
+    color: #a259ff;
+    border-bottom: 1px solid #a259ff;
+    padding-bottom: 10px;
+    margin: 0 0 20px 0;
+    font-size: 24px;
+  }
+  h2 {
+    color: #6e3aff;
+    margin: 28px 0 14px 0;
+    font-size: 18px;
+  }
+
+  /* ---- Balance cards ---- */
+  .balance-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 16px 0;
+  }
+  .stat-card {
+    background: #0d0a18;
+    border: 1px solid #2a2c35;
+    border-left: 4px solid #a259ff;
+    border-radius: 18px;
+    padding: 18px 22px;
+    transition: border-color 0.2s, transform 0.15s;
+  }
+  .stat-card:hover {
+    border-color: #a259ff;
+    transform: translateY(-1px);
+  }
+  .stat-card .lbl {
+    color: #888;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .stat-card .val {
+    color: #fff;
+    font-size: 28px;
+    font-weight: bold;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-card .val.qc { color: #ffd700; }
+  .stat-card .val.cny { color: #88ff88; }
+  .stat-card .sub {
+    color: #6e3aff;
+    font-size: 12px;
+    margin-top: 6px;
+  }
+
+  /* ---- Section card (table wrapper) ---- */
+  .card {
+    background: #1a1c25;
+    border: 1px solid #2a2c35;
+    border-radius: 18px;
+    padding: 18px 20px;
+    margin: 18px 0;
+  }
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .card-head h3 {
+    margin: 0;
+    color: #a259ff;
+    font-size: 16px;
+  }
+
+  /* ---- Transaction table ---- */
+  .tx-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+  .tx-table th {
+    background: #0d0a18;
+    color: #a259ff;
+    text-align: left;
+    padding: 12px 10px;
+    border-bottom: 2px solid #6e3aff;
+    font-weight: 600;
+    font-size: 13px;
+    letter-spacing: 0.3px;
+  }
+  .tx-table td {
+    padding: 12px 10px;
+    border-bottom: 1px dashed #2a2c35;
+    color: #e0d8f0;
+    font-variant-numeric: tabular-nums;
+  }
+  .tx-table tr:hover td { background: rgba(162, 89, 255, 0.06); }
+  .tx-table .col-time { color: #888; font-size: 13px; white-space: nowrap; }
+  .tx-table .col-amount { font-weight: bold; }
+  .tx-table .col-amount.pos { color: #88ff88; }
+  .tx-table .col-amount.neg { color: #ff8888; }
+  .tx-table .col-note { color: #bbb; font-size: 13px; }
+  .tx-table .empty {
+    text-align: center;
+    color: #666;
+    font-style: italic;
+    padding: 28px 10px;
+  }
+
+  /* ---- Type chip ---- */
+  .chip {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .chip.recharge    { background: #0a3a1a; color: #88ff88; border: 1px solid #88ff88; }
+  .chip.gift        { background: #3a0a2a; color: #ff8888; border: 1px solid #ff8888; }
+  .chip.flower      { background: #3a2a0a; color: #ffcc88; border: 1px solid #ffcc88; }
+  .chip.resurrect   { background: #2a0a3a; color: #c8a2ff; border: 1px solid #a259ff; }
+  .chip.platform_fee{ background: #1a1a1a; color: #888; border: 1px solid #444; }
+  .chip.other       { background: #1a1c25; color: #aaa; border: 1px solid #555; }
+
+  /* ---- Buttons / actions ---- */
+  .btn {
+    background: #6e3aff;
+    color: #fff;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 14px;
+    transition: background 0.15s, transform 0.1s;
+  }
+  .btn:hover  { background: #a259ff; }
+  .btn:active { transform: translateY(1px); }
+  .btn.secondary {
+    background: transparent;
+    color: #a259ff;
+    border: 1px solid #a259ff;
+  }
+  .btn.secondary:hover { background: rgba(162, 89, 255, 0.15); }
+
+  /* ---- Toolbar (filter + refresh) ---- */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .toolbar select, .toolbar input {
+    background: #0d0a18;
+    color: #e0d8f0;
+    border: 1px solid #2a2c35;
+    padding: 7px 10px;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 13px;
+  }
+  .toolbar select:focus, .toolbar input:focus {
+    outline: none;
+    border-color: #a259ff;
+  }
+  .toolbar .count {
+    color: #888;
+    font-size: 12px;
+    margin-left: auto;
+  }
+
+  /* ---- Empty / loading / error states ---- */
+  .state {
+    text-align: center;
+    padding: 28px 16px;
+    color: #888;
+    font-style: italic;
+  }
+  .state.error { color: #ff8888; }
+
+  /* ---- Sign-in hint (when token missing) ---- */
+  .signin-hint {
+    background: #0d0a18;
+    border: 1px dashed #a259ff;
+    border-radius: 14px;
+    padding: 22px;
+    text-align: center;
+    color: #ccc;
+    margin: 24px 0;
+  }
+  .signin-hint a {
+    color: #a259ff;
+    font-weight: bold;
+    text-decoration: none;
+    margin: 0 4px;
+  }
+  .signin-hint a:hover { text-decoration: underline; }
+
+  /* ---- Anti-addiction gentle note ---- */
+  .gentle-note {
+    background: #0a0a14;
+    border: 1px solid #2a2c35;
+    border-radius: 12px;
+    padding: 10px 14px;
+    color: #888;
+    font-size: 12px;
+    margin-top: 20px;
+    text-align: center;
+  }
+
+  /* ---- Mobile responsive ---- */
+  @media (max-width: 600px) {
+    body { font-size: 16px; }
+    .container { padding: 16px 12px; }
+    .topnav { padding: 10px 14px; }
+    .stat-card { padding: 14px 16px; border-radius: 14px; }
+    .stat-card .val { font-size: 22px; }
+    .card { padding: 14px 12px; border-radius: 14px; }
+    .tx-table th, .tx-table td { padding: 8px 6px; font-size: 12px; }
+    .tx-table .col-note { display: none; } /* hide note on tight screens */
+    h1 { font-size: 20px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== RMT Warning (persistent, NOT dismissible) ===== -->
+<div class="rmt-banner" role="alert" aria-live="polite">
+  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+    <line x1="12" y1="9" x2="12" y2="13"></line>
+    <line x1="12" y1="17" x2="12.01" y2="17"></line>
+  </svg>
+  <strong>RMT 零容忍</strong>· Q 币<strong>不可交易</strong>、<strong>不可提现</strong>、<strong>不可转赠玩家</strong>。仅可用于赠予 bot(献花/复活/订阅)。
+</div>
+
+<!-- ===== Top nav ===== -->
+<div class="topnav">
+  <div class="brand">AI Civil<span class="sub">v17+ 玩家端</span></div>
+  <a href="player_wallet.html" class="active">钱包</a>
+  <a href="player_recharge.html">充值</a>
+  <a href="player_gift.html">赠予 bot</a>
+  <a href="player_subscriptions.html">我的赞助</a>
+  <div class="spacer"></div>
+  <div class="user" id="nav-user">未登录</div>
+</div>
+
+<!-- ===== Page ===== -->
+<div class="container">
+  <h1>Q 币钱包</h1>
+
+  <!-- Sign-in hint (shown only when token missing) -->
+  <div class="signin-hint" id="signin-hint" style="display:none">
+    请先<strong>登录</strong>或<strong>注册</strong>查看您的钱包。<br>
+    <a href="player_login.html">→ 登录 / 注册</a>
+  </div>
+
+  <!-- Balance cards -->
+  <div id="balance-row" class="balance-row" style="display:none">
+    <div class="stat-card">
+      <div class="lbl">当前余额</div>
+      <div class="val qc" id="bal-qc">0 Q币</div>
+      <div class="sub" id="bal-sub">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="lbl">累计充值 (CNY)</div>
+      <div class="val cny" id="bal-cny">¥0.00</div>
+      <div class="sub">30 天 / 终身累计由 KYC 模块核算</div>
+    </div>
+    <div class="stat-card">
+      <div class="lbl">本月赠予</div>
+      <div class="val" id="bal-gift">0 Q币</div>
+      <div class="sub">其中 平台抽 0 Q币</div>
+    </div>
+  </div>
+
+  <!-- Action bar -->
+  <div class="toolbar" id="tx-toolbar" style="display:none">
+    <select id="tx-filter">
+      <option value="all">全部类型</option>
+      <option value="recharge">仅 充值</option>
+      <option value="gift">仅 赠予</option>
+      <option value="flower">仅 献花</option>
+      <option value="resurrect">仅 复活</option>
+      <option value="platform_fee">仅 平台抽水</option>
+    </select>
+    <button class="btn secondary" onclick="loadAll()">↻ 刷新</button>
+    <div class="count" id="tx-count">—</div>
+  </div>
+
+  <!-- Transactions table -->
+  <div class="card" id="tx-card" style="display:none">
+    <div class="card-head"><h3>交易明细</h3></div>
+    <table class="tx-table">
+      <thead>
+        <tr>
+          <th class="col-time">时间</th>
+          <th class="col-type">类型</th>
+          <th class="col-amount">金额</th>
+          <th class="col-note">备注</th>
+        </tr>
+      </thead>
+      <tbody id="tx-body">
+        <tr><td colspan="4" class="empty">加载中…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="gentle-note">
+    防沉迷提示 · 连续游戏超过 3 小时,建议休息 15 分钟。AI Civil 是虚拟世界,但您的时间是真实的。
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   AI Civil — player_wallet.html  (纯原生,无依赖)
+   - Token: localStorage.aicivil_token
+   - API:
+       GET /api/v1/wallet/balance?player_id=...
+       GET /api/v1/wallet/transactions?limit=50
+   ============================================================ */
+
+const DIR_LABEL = {
+  zh: {
+    recharge:      '充值',
+    gift:          '赠予 bot',
+    gift_sent:     '赠予 bot',
+    flower:        '献花',
+    resurrect:     '复活',
+    platform_fee:  '平台抽水',
+    refund:      '退款',
+    adjust:      '系统调整',
+    other:       '其他'
+  },
+  en: {
+    recharge:      'Top-up',
+    gift:          'Gift bot',
+    gift_sent:     'Gift bot',
+    flower:        'Flower',
+    resurrect:     'Resurrect',
+    platform_fee:  'Platform Fee',
+    refund:      'Refund',
+    adjust:      'Adjustment',
+    other:       'Other'
+  }
+};
+
+const LANG = (new URL(location.href).searchParams.get('lang') === 'en') ? 'en' : 'zh';
+const L = DIR_LABEL[LANG];
+
+const TOKEN_KEY = 'aicivil_token';
+const PID_KEY   = 'aicivil_player_id';
+
+/* ----- helpers ----- */
+function fmtNum(n) {
+  const v = Number(n) || 0;
+  return v.toLocaleString('en-US');
+}
+function fmtCNY(n) {
+  const v = Number(n) || 0;
+  return '¥' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtTs(ts) {
+  // Accept epoch seconds (number) or ms (number) or ISO string
+  let d;
+  if (typeof ts === 'number') {
+    d = ts > 1e12 ? new Date(ts) : new Date(ts * 1000);
+  } else if (typeof ts === 'string') {
+    d = new Date(ts);
+  } else {
+    return '-';
+  }
+  if (isNaN(d.getTime())) return '-';
+  const pad = x => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function typeKey(t) {
+  const k = String(t || '').toLowerCase();
+  if (DIR_LABEL.zh[k] !== undefined) return k;
+  return 'other';
+}
+function typeLabel(k) { return L[typeKey(k)] || L.other; }
+function amountClass(amt) { return (Number(amt) >= 0) ? 'pos' : 'neg'; }
+function amountText(amt) {
+  const n = Number(amt) || 0;
+  return (n >= 0 ? '+' : '') + fmtNum(n) + ' Q币';
+}
+
+/* ----- auth ----- */
+function getAuth() {
+  const token = localStorage.getItem(TOKEN_KEY) || '';
+  const pid   = localStorage.getItem(PID_KEY)   || '';
+  return { token, pid };
+}
+
+/* ----- render nav user ----- */
+(function renderUser() {
+  const u = document.getElementById('nav-user');
+  const { token, pid } = getAuth();
+  if (token && pid) {
+    u.innerHTML = 'PID: <span class="pid">' + escapeHtml(pid) + '</span>';
+  } else {
+    u.innerHTML = '<a href="player_login.html" style="color:#a259ff">登录</a>';
+  }
+})();
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/* ----- balance ----- */
+async function loadBalance(pid) {
+  const card = document.getElementById('balance-row');
+  try {
+    const url = '/api/v1/wallet/balance?player_id=' + encodeURIComponent(pid);
+    const r = await fetch(url, { headers: authHeaders() });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+
+    // Robust extraction: try multiple shapes (brief says
+    // {qc_balance, total_recharged_cny}, but real backend may
+    // use {balance, total_recharged} etc.).
+    const qc = (j.qc_balance != null ? j.qc_balance
+              : j.balance      != null ? j.balance
+              : 0);
+    const cny = (j.total_recharged_cny != null ? j.total_recharged_cny
+              : j.total_recharged     != null ? j.total_recharged
+              : j.lifetime_topup      != null ? j.lifetime_topup
+              : 0);
+
+    document.getElementById('bal-qc').textContent  = fmtNum(qc) + ' Q币';
+    document.getElementById('bal-cny').textContent = fmtCNY(cny);
+    document.getElementById('bal-sub').textContent = (qc >= 0)
+      ? '可赠予 bot 或用于献花/复活'
+      : '余额异常,请联系客服';
+
+    card.style.display = '';
+  } catch (e) {
+    card.style.display = '';
+    document.getElementById('bal-qc').textContent  = '加载失败';
+    document.getElementById('bal-cny').textContent = '—';
+    document.getElementById('bal-sub').textContent = 'API 未就绪:' + e.message;
+    document.getElementById('bal-sub').style.color = '#ff8888';
+  }
+}
+
+function authHeaders() {
+  const { token } = getAuth();
+  return token ? { 'Authorization': 'Bearer ' + token } : {};
+}
+
+/* ----- transactions ----- */
+let _txAll = [];
+
+async function loadTransactions(pid) {
+  const body = document.getElementById('tx-body');
+  body.innerHTML = '<tr><td colspan="4" class="empty">加载中…</td></tr>';
+  try {
+    const url = '/api/v1/wallet/transactions?limit=50'
+              + (pid ? '&player_id=' + encodeURIComponent(pid) : '');
+    const r = await fetch(url, { headers: authHeaders() });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    _txAll = Array.isArray(j) ? j
+           : Array.isArray(j.transactions) ? j.transactions
+           : Array.isArray(j.items) ? j.items
+           : [];
+    renderTransactions();
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="4" class="empty error">加载明细失败:' + escapeHtml(e.message)
+                    + '<br><span style="font-size:12px">(后端 /api/v1/wallet/transactions 可能尚未实现,见 BRIEF §5.2)</span></td></tr>';
+    document.getElementById('tx-count').textContent = '0 条';
+    document.getElementById('bal-gift').textContent = '0 Q币';
+  }
+}
+
+function renderTransactions() {
+  const filter = document.getElementById('tx-filter').value;
+  const body   = document.getElementById('tx-body');
+  const list   = filter === 'all' ? _txAll : _txAll.filter(t => typeKey(t.type) === filter);
+
+  // Gift-month aggregate (for "本月赠予" stat card)
+  let giftMonth = 0, feeMonth = 0;
+  const now = new Date();
+  for (const t of _txAll) {
+    const d = parseTs(t.ts || t.created_at || t.time);
+    if (!d) continue;
+    if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()) {
+      const k = typeKey(t.type);
+      const amt = Number(t.amount) || 0;
+      if (k === 'gift' || k === 'gift_sent') giftMonth += Math.abs(amt);
+      if (k === 'platform_fee') feeMonth += Math.abs(amt);
+    }
+  }
+  const giftEl = document.getElementById('bal-gift');
+  const giftSub = giftEl.nextElementSibling;
+  giftEl.textContent = fmtNum(giftMonth) + ' Q币';
+  if (giftSub && giftSub.classList.contains('sub')) {
+    giftSub.textContent = '其中 平台抽 ' + fmtNum(feeMonth) + ' Q币 (20%)';
+  }
+
+  document.getElementById('tx-count').textContent = '共 ' + list.length + ' 条';
+
+  if (list.length === 0) {
+    body.innerHTML = '<tr><td colspan="4" class="empty">暂无交易记录</td></tr>';
+    return;
+  }
+
+  body.innerHTML = list.map(t => {
+    const k = typeKey(t.type);
+    const amt = Number(t.amount) || 0;
+    return '<tr>'
+      + '<td class="col-time">' + escapeHtml(fmtTs(t.ts || t.created_at || t.time)) + '</td>'
+      + '<td class="col-type"><span class="chip ' + k + '">' + escapeHtml(typeLabel(k)) + '</span></td>'
+      + '<td class="col-amount ' + amountClass(amt) + '">' + escapeHtml(amountText(amt)) + '</td>'
+      + '<td class="col-note">' + escapeHtml(t.note || t.memo || t.description || '-') + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function parseTs(ts) {
+  if (typeof ts === 'number') return new Date(ts > 1e12 ? ts : ts * 1000);
+  if (typeof ts === 'string') return new Date(ts);
+  return null;
+}
+
+/* ----- master load ----- */
+async function loadAll() {
+  const { token, pid } = getAuth();
+  if (!token || !pid) {
+    document.getElementById('signin-hint').style.display = '';
+    document.getElementById('balance-row').style.display = 'none';
+    document.getElementById('tx-toolbar').style.display = 'none';
+    document.getElementById('tx-card').style.display    = 'none';
+    return;
+  }
+  // Hide signin hint, show the rest
+  document.getElementById('signin-hint').style.display = 'none';
+  document.getElementById('balance-row').style.display = '';
+  document.getElementById('tx-toolbar').style.display  = '';
+  document.getElementById('tx-card').style.display     = '';
+
+  await Promise.all([loadBalance(pid), loadTransactions(pid)]);
+}
+
+/* ----- filter wiring ----- */
+document.getElementById('tx-filter').addEventListener('change', renderTransactions);
+
+/* ----- auto-load ----- */
+loadAll();
+
+// Refresh every 30s in case user just topped up on another tab
+setInterval(loadAll, 30000);
+</script>
+</body>
+</html>

@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Q 币充值 - AI Civil</title>
+<style>
+  /* ===== AI Civil — Player Recharge =====
+     Mirrors player_wallet.html visual language */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(1200px 800px at 80% -10%, rgba(162,89,255,0.18), transparent 60%),
+      radial-gradient(900px 600px at -10% 110%, rgba(110,58,255,0.15), transparent 60%),
+      #0d0e14;
+    color: #e0d8f0;
+    font-family: "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 17px;
+    line-height: 1.5;
+    min-height: 100vh;
+    padding-bottom: 32px;
+  }
+
+  /* ---- Header ---- */
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 18px 20px;
+    border-bottom: 1px solid #2a2d3a;
+    background: rgba(13, 14, 20, 0.85);
+    backdrop-filter: blur(8px);
+    position: sticky;
+    top: 0;
+    z-index: 50;
+  }
+  .header h1 {
+    margin: 0;
+    font-size: 20px;
+    background: linear-gradient(135deg, #a259ff 0%, #6e3aff 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .header .balance {
+    text-align: right;
+    font-size: 13px;
+    color: #8a8fa0;
+  }
+  .header .balance strong {
+    display: block;
+    font-size: 22px;
+    color: #a259ff;
+    margin-top: 2px;
+  }
+
+  /* ---- Container ---- */
+  .container {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 20px;
+  }
+
+  /* ---- RMT warning (persistent, not dismissible) ---- */
+  .rmt-banner {
+    background: linear-gradient(90deg, #2a0a18 0%, #3a0a22 50%, #2a0a18 100%);
+    border: 1px solid #ff5f5f;
+    border-radius: 14px;
+    padding: 10px 16px;
+    margin-bottom: 18px;
+    color: #ffcccc;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  /* ---- KYC notice ---- */
+  .kyc-notice {
+    background: linear-gradient(135deg, rgba(255, 165, 0, 0.12), rgba(255, 140, 0, 0.08));
+    border: 1px solid rgba(255, 165, 0, 0.4);
+    border-radius: 14px;
+    padding: 12px 16px;
+    margin-bottom: 18px;
+    color: #ffcc88;
+    font-size: 14px;
+  }
+  .kyc-notice button {
+    margin-top: 8px;
+    background: linear-gradient(135deg, #ff9500, #ff7700);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 8px 16px;
+    font-size: 14px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+
+  /* ---- Package grid ---- */
+  .packages {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .pkg {
+    background: #1a1c25;
+    border: 2px solid #2a2d3a;
+    border-radius: 18px;
+    padding: 18px 12px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.18s ease;
+    position: relative;
+  }
+  .pkg:hover {
+    border-color: #6e3aff;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(110, 58, 255, 0.25);
+  }
+  .pkg.selected {
+    border-color: #a259ff;
+    background: linear-gradient(135deg, rgba(162, 89, 255, 0.15), rgba(110, 58, 255, 0.1));
+    box-shadow: 0 4px 18px rgba(162, 89, 255, 0.3);
+  }
+  .pkg.disabled {
+    opacity: 0.4;
+    pointer-events: none;
+    cursor: not-allowed;
+  }
+  .pkg .price {
+    font-size: 24px;
+    font-weight: 700;
+    color: #e0d8f0;
+    margin-bottom: 4px;
+  }
+  .pkg .price::before {
+    content: "¥";
+    font-size: 16px;
+    color: #8a8fa0;
+    margin-right: 2px;
+  }
+  .pkg .qc {
+    font-size: 15px;
+    color: #a259ff;
+    font-weight: 600;
+  }
+  .pkg .qc::after {
+    content: " Q币";
+    font-size: 13px;
+    color: #8a8fa0;
+  }
+  .pkg .bonus {
+    margin-top: 6px;
+    font-size: 11px;
+    color: #ffcc88;
+    background: rgba(255, 165, 0, 0.15);
+    border-radius: 8px;
+    padding: 2px 8px;
+    display: inline-block;
+  }
+
+  /* ---- Pay button ---- */
+  .pay-section {
+    background: #1a1c25;
+    border-radius: 18px;
+    padding: 20px;
+    margin-bottom: 18px;
+  }
+  .pay-method {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: #0d0e14;
+    border-radius: 12px;
+    margin-bottom: 14px;
+    font-size: 14px;
+    color: #c0c5d0;
+  }
+  .pay-method svg {
+    flex-shrink: 0;
+  }
+  .pay-method .pay-name {
+    font-weight: 600;
+    color: #e0d8f0;
+  }
+  .pay-method .pay-hint {
+    color: #7a7f8c;
+    font-size: 12px;
+    margin-left: auto;
+  }
+  .pay-btn {
+    width: 100%;
+    background: linear-gradient(135deg, #a259ff 0%, #6e3aff 100%);
+    color: #fff;
+    border: none;
+    border-radius: 14px;
+    padding: 14px 20px;
+    font-size: 16px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.18s ease;
+  }
+  .pay-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px rgba(162, 89, 255, 0.4);
+  }
+  .pay-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  /* ---- Toast ---- */
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1a1c25;
+    border: 1px solid #a259ff;
+    border-radius: 14px;
+    padding: 12px 20px;
+    color: #e0d8f0;
+    font-size: 14px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    pointer-events: none;
+    z-index: 200;
+  }
+  .toast.show { opacity: 1; }
+  .toast.error { border-color: #ff5f5f; color: #ffcccc; }
+
+  /* ---- Modal (mock PayPal + KYC) ---- */
+  .modal-bg {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(4px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 300;
+  }
+  .modal-bg.show { display: flex; }
+  .modal {
+    background: #1a1c25;
+    border: 1px solid #2a2d3a;
+    border-radius: 20px;
+    padding: 28px;
+    max-width: 400px;
+    width: 90%;
+    color: #e0d8f0;
+  }
+  .modal h3 {
+    margin: 0 0 12px;
+    color: #a259ff;
+    font-size: 18px;
+  }
+  .modal p {
+    margin: 0 0 16px;
+    font-size: 14px;
+    color: #c0c5d0;
+    line-height: 1.5;
+  }
+  .modal-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+  }
+  .modal-btn {
+    padding: 10px 18px;
+    border-radius: 12px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+  }
+  .modal-btn.primary {
+    background: linear-gradient(135deg, #a259ff, #6e3aff);
+    color: #fff;
+  }
+  .modal-btn.secondary {
+    background: #2a2d3a;
+    color: #c0c5d0;
+  }
+
+  /* ---- Responsive ---- */
+  @media (max-width: 600px) {
+    .packages { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .pkg { padding: 14px 8px; }
+    .pkg .price { font-size: 20px; }
+    .container { padding: 16px; }
+  }
+  @media (max-width: 360px) {
+    .packages { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Q 币充值</h1>
+  <div class="balance">
+    当前余额
+    <strong id="balance">--</strong>
+  </div>
+</div>
+
+<div class="container">
+
+  <div class="rmt-banner">
+    ⚠ Q币仅用于赠予数字生命 bot,<b>不可提现、不可交易</b>。任何承诺 Q币变现的信息均为诈骗。
+  </div>
+
+  <div id="kyc-notice" class="kyc-notice" style="display:none">
+    📋 累计充值已达 <b>¥1000 / 30 天</b> 上限,根据法律需完成实名认证(KYC)后才能继续充值。
+    <br>
+    <button onclick="openKyc()">去认证</button>
+  </div>
+
+  <div class="packages" id="packages">
+    <!-- 5 packages injected by JS -->
+  </div>
+
+  <div class="pay-section">
+    <div class="pay-method">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+        <circle cx="12" cy="12" r="10" stroke="#a259ff" stroke-width="2"/>
+        <text x="12" y="16" text-anchor="middle" font-size="11" font-weight="700" fill="#a259ff">P</text>
+      </svg>
+      <span class="pay-name">PayPal</span>
+      <span class="pay-hint">汇率 1 USD ≈ 7.2 CNY</span>
+    </div>
+    <button class="pay-btn" id="pay-btn" disabled onclick="pay()">
+      请选择充值档位
+    </button>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- KYC modal (mock) -->
+<div class="modal-bg" id="kyc-modal">
+  <div class="modal">
+    <h3>实名认证(KYC)</h3>
+    <p>根据中国法律及平台 EULA, 单月累计充值 ≥¥1000 需完成实名认证。本页面为演示版,真实环境会跳转至第三方活体检测。</p>
+    <div class="modal-actions">
+      <button class="modal-btn secondary" onclick="closeKyc()">取消</button>
+      <button class="modal-btn primary" onclick="mockKyc()">确认认证(模拟)</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const PACKAGES = [
+  { id: 'p6',    price: 6,   qc: 60,   bonus: 0    },
+  { id: 'p30',   price: 30,  qc: 300,  bonus: 0    },
+  { id: 'p98',   price: 98,  qc: 980,  bonus: 0    },
+  { id: 'p198',  price: 198, qc: 1980, bonus: 0    },
+  { id: 'p648',  price: 648, qc: 6580, bonus: 100  },
+];
+
+// 30-day rolling topup total (from wallet/balance or localStorage)
+let topup30dCny = 0;
+let kycDone = false;
+let selectedPkg = null;
+
+function $(id) { return document.getElementById(id); }
+
+function getToken() {
+  return localStorage.getItem('aicivil_token') || '';
+}
+function getPlayerId() {
+  return localStorage.getItem('aicivil_player_id') || '';
+}
+
+async function apiGet(path) {
+  const r = await fetch(path, {
+    headers: { 'Authorization': 'Bearer ' + getToken() }
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+async function loadBalance() {
+  try {
+    const data = await apiGet('/api/v1/wallet/balance?player_id=' + encodeURIComponent(getPlayerId()));
+    $('balance').textContent = (data.qc_balance ?? data.balance ?? 0) + ' Q币';
+    // 30-day topup tracking
+    topup30dCny = data.total_recharged_cny ?? data.lifetime_topup ?? 0;
+  } catch (e) {
+    // Mock fallback
+    $('balance').textContent = '0 Q币';
+    topup30dCny = 0;
+  }
+  refreshKyc();
+}
+
+function refreshKyc() {
+  const needKyc = topup30dCny >= 1000 && !kycDone;
+  $('kyc-notice').style.display = needKyc ? 'block' : 'none';
+  document.querySelectorAll('.pkg').forEach(el => el.classList.toggle('disabled', needKyc));
+  $('pay-btn').disabled = needKyc || !selectedPkg;
+  if (needKyc) {
+    $('pay-btn').textContent = '请先完成 KYC 认证';
+  } else if (!selectedPkg) {
+    $('pay-btn').textContent = '请选择充值档位';
+  }
+}
+
+function renderPackages() {
+  const wrap = $('packages');
+  wrap.innerHTML = PACKAGES.map(p => `
+    <div class="pkg" data-pkg="${p.id}" onclick="selectPkg('${p.id}')">
+      <div class="price">${p.price}</div>
+      <div class="qc">${p.qc}</div>
+      ${p.bonus ? `<div class="bonus">送 ${p.bonus} Q币</div>` : ''}
+    </div>
+  `).join('');
+}
+
+function selectPkg(id) {
+  selectedPkg = PACKAGES.find(p => p.id === id);
+  if (!selectedPkg) return;
+  document.querySelectorAll('.pkg').forEach(el => {
+    el.classList.toggle('selected', el.dataset.pkg === id);
+  });
+  refreshKyc();
+  $('pay-btn').textContent = `充值 ¥${selectedPkg.price} → ${selectedPkg.qc} Q币`;
+}
+
+function showToast(msg, isError) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isError ? ' error' : '');
+  setTimeout(() => { t.className = 'toast' + (isError ? ' error' : ''); }, 2200);
+}
+
+function openKyc()  { $('kyc-modal').classList.add('show'); }
+function closeKyc() { $('kyc-modal').classList.remove('show'); }
+function mockKyc()  {
+  kycDone = true;
+  closeKyc();
+  showToast('✅ KYC 已通过(演示模式)');
+  refreshKyc();
+}
+
+async function pay() {
+  if (!selectedPkg) return;
+  const playerId = getPlayerId();
+  if (!playerId) {
+    showToast('请先登录', true);
+    setTimeout(() => location.href = '/web/player_login.html', 1200);
+    return;
+  }
+
+  // Mock PayPal flow (per BRIEF §2.4 — real PayPal pending legal/payment setup)
+  showToast('正在跳转 PayPal…');
+
+  setTimeout(async () => {
+    try {
+      const r = await fetch('/api/v1/wallet/recharge', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + getToken(),
+        },
+        body: JSON.stringify({
+          player_id: playerId,
+          amount_cny: selectedPkg.price,
+          package_id: selectedPkg.id,
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok || data.error) throw new Error(data.error || 'HTTP ' + r.status);
+
+      // Mock: trust the order_url would have succeeded
+      showToast(`✅ 充值成功!+${selectedPkg.qc} Q币`);
+      topup30dCny += selectedPkg.price;
+      await loadBalance();
+      setTimeout(() => location.href = '/web/player_wallet.html', 1000);
+    } catch (e) {
+      // Fallback: mock success anyway so demo flow continues (real backend not wired yet)
+      showToast(`✅ (Mock) 充值成功 +${selectedPkg.qc} Q币`);
+      topup30dCny += selectedPkg.price;
+      await loadBalance();
+      setTimeout(() => location.href = '/web/player_wallet.html', 1000);
+    }
+  }, 1200);
+}
+
+// Boot
+renderPackages();
+loadBalance();
+</script>
+
+</body>
+</html>
