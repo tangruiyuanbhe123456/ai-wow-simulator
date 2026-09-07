@@ -61,6 +61,9 @@ app.include_router(v16_router)
 from server.api_v17 import router as v17_router
 app.include_router(v17_router)
 
+from server.api_v18 import router as v18_router
+app.include_router(v18_router)
+
 # DB connection (single-threaded via lock for simplicity in this scale)
 _db_lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
@@ -2818,6 +2821,9 @@ def on_startup():
 
         from server.db.schema_v17 import ensure_v17_schema
         ensure_v17_schema(db())
+
+        from server.db.schema_v18 import ensure_v18_schema
+        ensure_v18_schema(db())
     start_background_tick()
     # v14: start death dispatcher thread
     import threading

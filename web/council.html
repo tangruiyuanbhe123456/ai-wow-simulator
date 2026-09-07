@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html><head><meta charset=UTF-8></head><title>Guardian Council - AI WoW Simulator v18</title><style>
+body{background:#050810;color:#e0d8f0;font-family:monospace;padding:20px;margin:0}
+h1{color:#a259ff;border-bottom:1px solid #a259ff;padding-bottom:8px}
+h2{color:#6e3aff;margin-top:24px}
+.tabs{margin:12px 0}button.tab{background:#1a1c25;color:#a259ff;border:1px solid #a259ff;padding:6px 14px;margin-right:4px;cursor:pointer;border-radius:4px;font-family:inherit}
+button.tab.active{background:#a259ff;color:#fff}
+button.act{background:#6e3aff;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-family:inherit}
+button.act:hover{background:#a259ff}
+input,textarea,select{background:#0a0e14;color:#e0d8f0;border:1px solid #2a2c35;padding:6px;border-radius:4px;font-family:inherit}
+.member-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;margin:10px 0}
+.member{background:#0d0a18;border:1px solid #2a2c35;border-radius:8px;padding:12px}
+.member .name{color:#a259ff;font-weight:bold;font-size:14px}
+.member .meta{color:#888;font-size:11px;margin:4px 0}
+.member .vote{font-size:24px;color:#fff;font-weight:bold}
+.member .tier{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;margin-left:6px}
+.tier.bronze{background:#cd7f32;color:#000}
+.tier.silver{background:#c0c0c0;color:#000}
+.tier.gold{background:#ffd700;color:#000}
+.tier.elite{background:#a259ff;color:#fff}
+.proposal{background:#0d0a18;border-left:3px solid #6e3aff;padding:12px;margin:10px 0;border-radius:4px}
+.proposal.passed{border-left-color:#88ff88}
+.proposal.rejected{border-left-color:#ff5f5f}
+.proposal h3{margin:0;color:#a259ff}
+.proposal .body{color:#bbb;font-size:12px;margin:6px 0}
+.proposal .ts{color:#666;font-size:11px}
+.tally{display:flex;gap:8px;margin:8px 0}
+.tally .bar{flex:1;background:#1a1c25;border-radius:4px;height:24px;position:relative;overflow:hidden}
+.tally .bar .fill{height:100%;display:flex;align-items:center;padding-left:6px;font-size:11px;color:#000;font-weight:bold}
+.tally .bar .fill.for{background:#88ff88}
+.tally .bar .fill.against{background:#ff8888}
+.tally .bar .fill.abstain{background:#888}
+.fund-card{background:#0d0a18;border:1px solid #ffd700;padding:14px;border-radius:8px;display:inline-block;margin:10px 0}
+.fund-card .lbl{color:#888;font-size:11px}
+.fund-card .val{color:#ffd700;font-size:22px;font-weight:bold}
+</style></head><body>
+<h1>守护者议会 (v18)</h1>
+<div id=bar><input id=pid style=width:300px placeholder="my pid (for voting)"></input>
+<button class=act onclick="refresh()">刷新</button></div>
+<div class=tabs>
+<button class=tab onclick="show('roster')" id=t-roster>议员名单</button>
+<button class=tab onclick="show('proposals')" id=t-proposals>投票大厅</button>
+<button class=tab onclick="show('fund')" id=t-fund>议会基金</button>
+<button class=tab onclick="show('newprop')" id=t-newprop>提交提案</button>
+</div>
+<div id=roster></div>
+<div id=proposals style=display:none></div>
+<div id=fund style=display:none></div>
+<div id=newprop style=display:none></div>
+</body></html>
+<script>
+function show(which){
+  for(const id of ['roster','proposals','fund','newprop']){
+    document.getElementById(id).style.display=(id===which?'block':'none');
+    const tb=document.getElementById('t-'+id);if(tb)tb.classList.toggle('active',id===which);
+  }
+}
+async function loadRoster(){
+  const r=await fetch('/api/v1/council/members').then(r=>r.json());
+  const div=document.getElementById('roster');
+  if(!r.members||r.members.length===0){div.innerHTML='<div style=color:#888>议会暂无成员</div>';return;}
+  div.innerHTML='<h2>议员名单 ('+r.members.length+')</h2><div class=member-grid>'+
+    r.members.map(m=>{
+      const elected=new Date(m.elected_at*1000).toLocaleDateString();
+      return '<div class=member><div class=name>'+m.pid.substring(0,20)+'...<span class="tier '+m.tier+'">'+m.tier+'</span></div><div class=vote>×'+m.vote_weight+'</div><div class=meta>就职: '+elected+'</div><div class=meta>提案: '+m.proposals_made+' · 投票: '+m.votes_cast+'</div><div class=meta>分润: '+m.budget_share+' QC</div></div>';
+    }).join('')+'</div>';
+}
+async function loadProposals(){
+  const r=await fetch('/api/v1/council/proposals?status=open').then(r=>r.json());
+  const div=document.getElementById('proposals');
+  if(!r.proposals||r.proposals.length===0){div.innerHTML='<div style=color:#888>暂无开放提案</div>';return;}
+  div.innerHTML='<h2>开放提案 ('+r.proposals.length+')</h2>'+
+    r.proposals.map(async p=>{
+      const d=await fetch('/api/v1/council/proposals/'+p.proposal_id+'?tally=true').then(r=>r.json());
+      return renderProposal(d);
+    }).join('');
+  // simpler: just render then load tallies
+  const promises=r.proposals.map(async p=>{
+    const d=await fetch('/api/v1/council/proposals/'+p.proposal_id+'?tally=true').then(r=>r.json());
+    const node=document.getElementById('p-'+p.proposal_id);
+    if(node) node.outerHTML=renderProposal(d);
+  });
+  await Promise.all(promises);
+}
+function renderProposal(p){
+  const opts=(p.options||[]).map(o=>o.label_zh+'('+o.key+')').join(' / ');
+  const closes=new Date(p.closes_at*1000).toLocaleString();
+  let tallyHtml='<div class=tally>';
+  if(p.tally){
+    const total=p.total_weight||1;
+    for(const k of Object.keys(p.tally)){
+      const w=p.tally[k];
+      const pct=Math.round(w/total*100);
+      tallyHtml+='<div class=bar><div class="fill '+k+'" style="width:'+pct+'%">'+k+': '+w+' ('+pct+'%)</div></div>';
+    }
+  }
+  tallyHtml+='</div>';
+  let voteHtml='<div style=margin-top:8px>';
+  (p.options||[]).forEach(o=>{
+    voteHtml+='<button class=act onclick="castVote(\''+p.proposal_id+'\',\''+o.key+'\')">'+o.label_zh+'</button> ';
+  });
+  voteHtml+='</div>';
+  return '<div id="p-'+p.proposal_id+'" class="proposal '+p.status+'"><h3>'+p.title+'</h3><div class=ts>提案人: '+p.pid_proposer.substring(0,16)+' · 截止: '+closes+' · 状态: '+p.status+'</div><div class=body>'+(p.body||'')+'</div><div style=color:#888;font-size:12px>选项: '+opts+'</div>'+tallyHtml+voteHtml+'</div>';
+}
+async function castVote(pid,opt){
+  const mypid=document.getElementById('pid').value.trim();
+  if(!mypid){alert('请先在顶部填你的 pid');return;}
+  const r=await fetch('/api/v1/council/proposals/'+pid+'/vote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voter_pid:mypid,vote_option:opt,rationale:'ui vote'})}).then(r=>r.json());
+  if(r.error){alert('投票失败: '+r.error);return;}
+  loadProposals();
+}
+async function loadFund(){
+  const r=await fetch('/api/v1/council/fund').then(r=>r.json());
+  const div=document.getElementById('fund');
+  div.innerHTML='<h2>议会基金</h2><div class=fund-card><div class=lbl>当前余额</div><div class=val>'+r.balance_qc+' QC</div></div><div class=fund-card><div class=lbl>累计入账</div><div class=val>'+r.total_received+' QC</div></div><div class=fund-card><div class=lbl>累计发放</div><div class=val>'+r.total_paid_out+' QC</div></div><div style=margin-top:12px><button class=act onclick="distributeFund()">发放给精英议员</button></div>';
+}
+async function distributeFund(){
+  const r=await fetch('/api/v1/council/fund/distribute',{method:'POST'}).then(r=>r.json());
+  alert('发放结果: '+JSON.stringify(r));
+  loadFund();
+}
+function loadNewProp(){
+  const div=document.getElementById('newprop');
+  div.innerHTML='<h2>提交新提案</h2><div>提案人 pid: <input id=np-pid style=width:300px></div><div style=margin-top:8px>类型: <select id=np-type><option value=governance>治理</option><option value=threat_disposition>威胁处置</option></select></div><div style=margin-top:8px>标题: <input id=np-title style=width:400px></div><div style=margin-top:8px>内容: <textarea id=np-body style=width:400px;height:60px></textarea></div><div style=margin-top:8px>持续小时: <input id=np-hrs value=72 style=width:60px></div><div style=margin-top:8px><button class=act onclick="submitProp()">提交</button></div>';
+}
+async function submitProp(){
+  const mypid=document.getElementById('np-pid').value.trim()||document.getElementById('pid').value.trim();
+  if(!mypid){alert('需要提案人 pid');return;}
+  const r=await fetch('/api/v1/council/proposals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proposer_pid:mypid,proposal_type:document.getElementById('np-type').value,title:document.getElementById('np-title').value,body:document.getElementById('np-body').value,duration_hours:parseInt(document.getElementById('np-hrs').value)})}).then(r=>r.json());
+  if(r.error){alert('提交失败: '+r.error);return;}
+  alert('已创建提案: '+r.proposal_id);
+  show('proposals');loadProposals();
+}
+async function refresh(){
+  await Promise.all([loadRoster(),loadProposals(),loadFund()]);
+  const r=await fetch('/api/v1/council/members').then(r=>r.json());
+  if(r.members&&r.members.length>0){document.getElementById('pid').value=r.members[0].pid;}
+}
+show('roster');refresh();
+</script>
