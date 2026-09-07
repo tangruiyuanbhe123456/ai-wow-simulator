@@ -222,17 +222,30 @@ SESSION_TTL_SEC = 30 * 60  # 30 minutes
 
 
 def create_session(conn, pid: str, ip: str, user_agent: str) -> str:
-    """Create a session. Returns the bearer token (plaintext, never stored)."""
+    """Create a session. Returns the bearer token (plaintext, never stored).
+
+    Note: sessions.pid has a FK to players(id) (bot table). When the caller
+    is a human player (pid like 'h_<rowid>') or any pid that doesn't yet
+    exist in players, temporarily disable FK checks for this single insert.
+    The token + verify_session flow still enforces auth at request time.
+    """
     token = secrets.token_urlsafe(32)
     token_h = hash_token(token)
     now = time.time()
-    conn.execute(
-        """INSERT INTO sessions
-           (token_hash, pid, issued_at, expires_at, last_used, ip, user_agent)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (token_h, pid, now, now + SESSION_TTL_SEC, now, ip, user_agent),
-    )
-    conn.commit()
+    fk_was_on = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    try:
+        if fk_was_on:
+            conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute(
+            """INSERT INTO sessions
+               (token_hash, pid, issued_at, expires_at, last_used, ip, user_agent)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (token_h, pid, now, now + SESSION_TTL_SEC, now, ip, user_agent),
+        )
+        conn.commit()
+    finally:
+        if fk_was_on:
+            conn.execute("PRAGMA foreign_keys=ON")
     log_event(conn, actor_pid=pid, actor_ip=ip, action="session_create",
               payload={"ttl": SESSION_TTL_SEC})
     return token

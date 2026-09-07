@@ -64,6 +64,10 @@ app.include_router(v17_router)
 from server.api_v18 import router as v18_router
 app.include_router(v18_router)
 
+# v18.3: Human player REST API (login, KYC, recharge, gift, bot list)
+from server.api_player import router as player_router
+app.include_router(player_router)
+
 # DB connection (single-threaded via lock for simplicity in this scale)
 _db_lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
