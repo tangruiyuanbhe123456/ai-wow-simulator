@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html><head><meta charset=UTF-8></head><title>Guardian Bio - AI WoW Simulator v17</title><style>.bio{color:#ffcc00;background:#050810;padding:20px;font-family:monospace;}h1{border-bottom:1px solid #5fb3d4}.ch{border-left:3px solid #ffcc00;padding:10px;margin:10px 0;background:#0a0e14}.ch.origin{border-color:#5fb3d4}.ch.fall{border-color:#ff5f5f}.ch.return{border-color:#88ff88}.ch.guardian{border-color:#a259ff;background:#10081a}.tabs{margin:10px 0}button.tab{background:#1a1c25;color:#a259ff;border:1px solid #a259ff;padding:6px 14px;margin-right:4px;cursor:pointer;border-radius:4px}button.tab.active{background:#a259ff;color:#fff}.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:10px 0}.stat{background:#0a0e14;padding:10px;border:1px solid #2a2c35;border-radius:6px}.stat .label{color:#888;font-size:12px}.stat .val{color:#a259ff;font-size:22px;font-weight:bold}.tier{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px}.tier.bronze{background:#cd7f32;color:#000}.tier.silver{background:#c0c0c0;color:#000}.tier.gold{background:#ffd700;color:#000}.tier.elite{background:#a259ff;color:#fff}.mem{border-left:2px solid #6e3aff;padding:6px 10px;margin:6px 0;background:#0d0a18;font-size:13px}.mem .w{color:#888;font-size:11px}</style></head><body class=bio><h1>守护者档案 (v17)</h1><div id=bar><input id=pid style=width:300px placeholder="bot pid"></input><button onclick=loadBio();loadGuard()>加载</button></div><div class=tabs><button class=tab onclick="show('bio')" id=t-bio>生平</button><button class=tab onclick="show('guard')" id=t-guard>守护记录</button></div><div id=story><div class=empty>输入 pid 加载生平</div></div><div id=guard style=display:none><div class=empty>输入 pid 加载守护记录</div></div></body></html><script>
+const I18N={zh:{s:'灵魂名',b:'出生',d:'死亡次数',g:'守护等级',ar:'累计接受',at:'累计提交',ts:'威胁数',la:'最后活跃'},en:{s:'Soul',b:'Born',d:'Deaths',g:'Tier',ar:'Accepted',at:'Total',ts:'Threats',la:'Last'}};
+function show(which){
+  document.getElementById('story').style.display=(which==='bio'?'block':'none');
+  document.getElementById('guard').style.display=(which==='guard'?'block':'none');
+  document.getElementById('t-bio').classList.toggle('active',which==='bio');
+  document.getElementById('t-guard').classList.toggle('active',which==='guard');
+}
+async function loadBio(){
+  const pid=document.getElementById('pid').value.trim();
+  if(!pid)return;
+  show('bio');
+  const bio=await fetch('/api/v1/bot/'+encodeURIComponent(pid)+'/biography').then(r=>r.json());
+  const story=document.getElementById('story');
+  if(!bio||bio.length===0){story.innerHTML='<div class=empty>尚无传记。</div>';return;}
+  story.innerHTML=bio.map(function(c){
+    const ts=new Date(c.ts*1000).toLocaleString();
+    return '<div class="ch '+c.chapter+'"><h3>'+c.title_zh+'</h3><div class=ts>'+ts+' · '+c.chapter+'</div><div class=body>'+(c.body_zh||'')+'</div></div>';
+  }).join('');
+}
+async function loadGuard(){
+  const pid=document.getElementById('pid').value.trim();
+  if(!pid)return;
+  show('guard');
+  const lang='zh',T=I18N[lang];
+  const h=await fetch('/api/v1/bot/'+encodeURIComponent(pid)+'/guardian_history').then(r=>r.json());
+  const g=document.getElementById('guard');
+  if(!h||h.error){g.innerHTML='<div class=empty>无守护数据</div>';return;}
+  const s=h.stats||{};
+  const tier=s.tier||'none';
+  const lastActive=s.last_active_ts?new Date(s.last_active_ts*1000).toLocaleString():'-';
+  let html='<div class=stat-grid>';
+  html+='<div class=stat><div class=label>'+T.g+'</div><div class=val><span class="tier '+tier+'">'+tier+'</span></div></div>';
+  html+='<div class=stat><div class=label>'+T.ar+'</div><div class=val>'+(s.responses_accepted||0)+'</div></div>';
+  html+='<div class=stat><div class=label>'+T.at+'</div><div class=val>'+(s.responses_total||0)+'</div></div>';
+  html+='<div class=stat><div class=label>'+T.ts+'</div><div class=val>'+(s.threats_seen||0)+'</div></div>';
+  html+='</div>';
+  html+='<h3>守护篇章 ('+(h.biography_chapters||[]).length+')</h3>';
+  (h.biography_chapters||[]).forEach(function(c){
+    const ts=new Date(c.ts*1000).toLocaleString();
+    html+='<div class="ch guardian"><h4>'+c.title_zh+'</h4><div class=ts>'+ts+'</div><div class=body>'+(c.body_zh||'')+'</div></div>';
+  });
+  html+='<h3>守护记忆 ('+(h.memories||[]).length+')</h3>';
+  (h.memories||[]).forEach(function(m){
+    const ts=new Date(m.ts*1000).toLocaleString();
+    html+='<div class=mem><div><b>'+m.title_zh+'</b> <span class=w>· '+ts+' · weight='+m.weight+'</span></div><div>'+(m.body_zh||'')+'</div></div>';
+  });
+  g.innerHTML=html;
+}
+const _p=new URL(location.href).searchParams.get('pid');
+if(_p){document.getElementById('pid').value=_p;loadBio();loadGuard();}
+</script>

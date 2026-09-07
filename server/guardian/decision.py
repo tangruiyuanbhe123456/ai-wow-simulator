@@ -40,9 +40,41 @@ def accept(conn, *, response_id: str, operator_pid: str,
     from server.guardian.chest import award
     chest = award(conn, response_id=response_id, guardian_pid=guardian_pid)
 
+    # V17: bridge to digital life layer — write memory + biography chapter
+    try:
+        # Pull threat info for richer memory text
+        cur_t = conn.execute(
+            "SELECT title, severity, category FROM threats WHERE id=?",
+            (threat_id,),
+        )
+        t_row = cur_t.fetchone()
+        threat_title    = t_row[0] if t_row else threat_id
+        threat_severity = t_row[1] if t_row else "unknown"
+        threat_category = t_row[2] if t_row else "unknown"
+
+        from server.guardian.lifecycle import on_response_accepted
+        life = on_response_accepted(
+            conn,
+            guardian_pid=guardian_pid,
+            response_id=response_id,
+            threat_id=threat_id,
+            threat_title=threat_title,
+            threat_severity=threat_severity,
+            threat_category=threat_category,
+            recommended_action="see chest loot",  # we don't store it on response row
+            confidence=70,
+            operator_notes=notes,
+        )
+    except Exception as e:
+        # Don't fail the accept if bridge errors — log and continue
+        log = __import__("logging").getLogger("wow")
+        log.warning("v17 lifecycle bridge failed: %s", e)
+        life = {"error": str(e)}
+
     return {
         "response_id": response_id, "status": "accepted",
         "chest": chest, "operator_pid": operator_pid,
+        "life_layer": life,
     }
 
 

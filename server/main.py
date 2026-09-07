@@ -58,6 +58,9 @@ app.include_router(v13_router)
 from server.api_v16 import router as v16_router
 app.include_router(v16_router)
 
+from server.api_v17 import router as v17_router
+app.include_router(v17_router)
+
 # DB connection (single-threaded via lock for simplicity in this scale)
 _db_lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
@@ -2812,6 +2815,9 @@ def on_startup():
         # v16: Guardian Protocol (threats / responses / chests / decisions)
         from server.db.schema_v16 import ensure_v16_schema
         ensure_v16_schema(db())
+
+        from server.db.schema_v17 import ensure_v17_schema
+        ensure_v17_schema(db())
     start_background_tick()
     # v14: start death dispatcher thread
     import threading
